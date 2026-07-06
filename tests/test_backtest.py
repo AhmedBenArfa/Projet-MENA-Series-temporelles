@@ -15,6 +15,14 @@ def test_kupiec_rejected_when_far_off():
     res = kupiec_pof(n_viol=200, n_obs=1000, alpha=0.05)  # 20% >> 5%
     assert res["reject"] is True and res["pvalue"] < 0.01
 
+def test_kupiec_zero_violations_is_rejected():
+    res = kupiec_pof(n_viol=0, n_obs=1000, alpha=0.05)
+    assert res["LR"] > 50 and res["reject"] is True and res["pvalue"] < 0.01
+
+def test_kupiec_all_violations_is_rejected():
+    res = kupiec_pof(n_viol=1000, n_obs=1000, alpha=0.05)
+    assert res["reject"] is True
+
 def test_summary_keys():
     rng=np.random.default_rng(0)
     y=rng.standard_normal(250); var=np.full(250,-1.645)

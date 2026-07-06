@@ -4,14 +4,14 @@ from scipy import stats
 def violations(y_true, var_levels) -> np.ndarray:
     return np.asarray(y_true) < np.asarray(var_levels)
 
+def _safe_log(x):
+    return np.log(x) if x > 0 else 0.0
+
 def kupiec_pof(n_viol, n_obs, alpha) -> dict:
     pi = n_viol/n_obs
-    if n_viol in (0, n_obs):
-        lr = 0.0
-    else:
-        ll_null = (n_obs-n_viol)*np.log(1-alpha) + n_viol*np.log(alpha)
-        ll_alt  = (n_obs-n_viol)*np.log(1-pi)   + n_viol*np.log(pi)
-        lr = -2*(ll_null-ll_alt)
+    ll_null = (n_obs-n_viol)*_safe_log(1-alpha) + n_viol*_safe_log(alpha)
+    ll_alt  = (n_obs-n_viol)*_safe_log(1-pi)   + n_viol*_safe_log(pi)
+    lr = -2*(ll_null-ll_alt)
     p = 1-stats.chi2.cdf(lr,1)
     return {"LR":lr,"pvalue":p,"reject":bool(p<0.05)}
 
@@ -23,7 +23,6 @@ def christoffersen(viol, alpha) -> dict:
         elif a==0 and b==1: n01+=1
         elif a==1 and b==0: n10+=1
         else: n11+=1
-    def _safe_log(x): return np.log(x) if x>0 else 0.0
     pi=(n01+n11)/max(n00+n01+n10+n11,1)
     pi0=n01/max(n00+n01,1); pi1=n11/max(n10+n11,1)
     ll_ind = (n00+n10)*_safe_log(1-pi)+(n01+n11)*_safe_log(pi)
