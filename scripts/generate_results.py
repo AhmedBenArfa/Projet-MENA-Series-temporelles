@@ -1,3 +1,6 @@
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+
 from pathlib import Path
 import pandas as pd
 from tsvar.run import run_all, run_index, MODELS
