@@ -15,3 +15,15 @@ def test_walk_forward_arima_returns_valid_forecast():
     assert np.all(fc.sigma>0) and len(fc.std_resid)>50
     v=var_series(fc,0.05)
     assert len(v)==len(te)
+
+def test_walk_forward_arima_on_unfrequenced_datetime_index():
+    rng = np.random.default_rng(4)
+    tr_idx = pd.DatetimeIndex(pd.date_range("2010-01-01", periods=200, freq="B").values)  # freq stripped
+    te_idx = pd.DatetimeIndex(pd.date_range("2011-06-01", periods=30, freq="B").values)   # non-abutting
+    tr = pd.Series(rng.standard_normal(200), index=tr_idx, name="X")
+    te = pd.Series(rng.standard_normal(30), index=te_idx, name="X")
+    assert tr.index.freq is None and te.index.freq is None      # like real data from tsvar.data
+    fc = walk_forward_arima(tr, te, order=(1,0,0))
+    assert len(fc.mu) == len(te)
+    assert (fc.dates == te.index).all()
+    v = var_series(fc, 0.05); assert len(v) == len(te)

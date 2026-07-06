@@ -30,10 +30,14 @@ def walk_forward_arima(train, test, order=None, seasonal_order=None) -> Forecast
         import pmdarima as pm
 
         order = pm.auto_arima(
-            train, seasonal=False, suppress_warnings=True, error_action="ignore"
+            train.values, seasonal=False, suppress_warnings=True, error_action="ignore"
         ).order
 
-    res = _fit(train, order, seasonal_order)
+    # Use a plain integer index internally so statsmodels never infers a date
+    # frequency (train and test come from two separate CSVs and may not abut).
+    n = len(train)
+    train_ri = pd.Series(np.asarray(train.values), index=pd.RangeIndex(n))
+    res = _fit(train_ri, order, seasonal_order)
 
     # res.resid includes burn-in artifacts at index 0; drop it, then drop any
     # remaining non-finite values so the residual pool is always usable.
@@ -42,27 +46,12 @@ def walk_forward_arima(train, test, order=None, seasonal_order=None) -> Forecast
     sigma = float(np.std(raw_resid))
     std_resid = (raw_resid - np.mean(raw_resid)) / sigma
 
-    # statsmodels' `.append(refit=False)` requires the appended observation's
-    # index to *extend* the fitted model's index (same freq, next timestamp).
-    # `test` is an independent series with its own (possibly non-contiguous
-    # or overlapping) index, so we build a shadow index that continues
-    # directly from `train`'s index at `train`'s frequency purely for the
-    # walk-forward bookkeeping. The original `test.index` is still what gets
-    # returned in `dates` below.
-    train_index = train.index
-    if isinstance(train_index, pd.DatetimeIndex) and train_index.freq is not None:
-        continuation_index = pd.date_range(
-            start=train_index[-1], periods=len(test) + 1, freq=train_index.freq
-        )[1:]
-    else:
-        continuation_index = pd.RangeIndex(len(train_index), len(train_index) + len(test))
-    walk_test = pd.Series(test.values, index=continuation_index, name=test.name)
-
     mu = np.empty(len(test))
     cur = res
     for t in range(len(test)):
         mu[t] = float(cur.forecast(1).iloc[0])
-        cur = cur.append(walk_test.iloc[t : t + 1], refit=False)
+        nxt = pd.Series([test.values[t]], index=pd.RangeIndex(n + t, n + t + 1))
+        cur = cur.append(nxt, refit=False)  # walk forward, no re-estimation
 
     return ForecastResult(
         mu=mu,
