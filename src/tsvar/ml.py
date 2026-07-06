@@ -9,7 +9,6 @@ shared ForecastResult / BHS-VaR interface used by every other model.
 """
 
 import numpy as np
-import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 
@@ -40,4 +39,4 @@ def walk_forward_ml(train, test, model_kind, n_lags=5) -> ForecastResult:
         hist.append(test.values[t])  # feed realized return
     return ForecastResult(mu=mu, sigma=np.full(len(test), sigma), std_resid=std_resid,
                           y_true=test.values, dates=test.index,
-                          name=getattr(test, "name", "series"))
+                          name=getattr(test, "name", None) or "series")
