@@ -53,14 +53,29 @@ backtesting (Kupiec, Christoffersen, zones Bâle).
 md("""
 ## 0. Initialisation
 
-Le notebook s'exécute depuis la racine du projet. On ajoute `src/` au
-`sys.path` pour importer `tsvar` sans installation (le package n'est pas
-`pip install`-é ; `pytest.ini` fait la même chose côté tests).
+Le notebook localise automatiquement la racine du projet (en remontant
+l'arborescence depuis le répertoire courant du kernel jusqu'à trouver
+`src/tsvar/`), puis ajoute `src/` au `sys.path` pour importer `tsvar` sans
+installation (le package n'est pas `pip install`-é ; `pytest.ini` fait la
+même chose côté tests). Cela fonctionne quel que soit le répertoire depuis
+lequel Jupyter a été lancé (racine du projet, `notebook/`, etc.).
 """)
 
 code("""
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path.cwd()/"src"))
+
+root = pathlib.Path.cwd().resolve()
+for candidate in (root, *root.parents):
+    if (candidate / "src" / "tsvar").is_dir():
+        sys.path.insert(0, str(candidate / "src"))
+        break
+else:
+    raise RuntimeError(f"Could not locate src/tsvar starting from {root}")
+
+# `candidate` now holds the located project root (the loop variable survives
+# the break) - anchor all data/output paths on it, not on the kernel's cwd,
+# so the notebook also works when nbconvert/Jupyter set cwd to notebook/.
+PROJECT_ROOT = candidate
 
 import warnings
 warnings.filterwarnings("ignore")  # statsmodels/arch convergence chatter is expected & benign here
@@ -74,8 +89,9 @@ from IPython.display import Image, display
 pd.set_option("display.width", 140)
 pd.set_option("display.max_columns", 20)
 
-DATA_DIR = Path("data (1)/data")
-FIG_DIR = Path("outputs/figures")
+DATA_DIR = PROJECT_ROOT / "data (1)" / "data"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+FIG_DIR = OUTPUTS_DIR / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 print("tsvar path bootstrap OK -", DATA_DIR.resolve())
@@ -219,6 +235,13 @@ md("""
 benchmarks développés, avec des queues de distribution épaisses (kurtosis
 élevée), signature classique des rendements financiers ("faits stylisés") :
 volatilité clusterisée, non-normalité, queues lourdes.
+
+**Rôle des benchmarks** : CAC 40 et S&P 500 servent uniquement de repères de
+marchés développés — un contexte comparatif des niveaux de volatilité et de
+rendement face aux indices MENA. Ils ne font pas l'objet d'un backtesting VaR
+faute de données de test dédiées (aucun fichier `*Test.csv` pour ces deux
+indices) : la comparaison VaR/backtesting (sections 9-11) porte donc
+uniquement sur les **4 indices MENA**.
 """)
 
 # ---------------------------------------------------------------------------
@@ -573,7 +596,7 @@ hyperparamètres que `run.MODELS`).
 """)
 
 code("""
-results = pd.read_csv("outputs/results.csv")
+results = pd.read_csv(OUTPUTS_DIR / "results.csv")
 
 adi_bt = (results[results["index"] == "ADI"]
           .sort_values(["model", "alpha"], ascending=[True, False])
@@ -617,7 +640,7 @@ Taux de violation observé (%) à 99% (attendu : 1%), par modèle x indice.
 """)
 
 code("""
-best = pd.read_csv("outputs/best_per_index.csv")
+best = pd.read_csv(OUTPUTS_DIR / "best_per_index.csv")
 best[["index", "model", "alpha", "observed_rate", "kupiec_p", "basel_zone"]]
 """)
 
