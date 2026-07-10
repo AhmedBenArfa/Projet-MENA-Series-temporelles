@@ -15,3 +15,6 @@ Thumbs.db
 
 # Notebook-generated scratch figures (embedded inline in notebooks)
 outputs/figures/nb_*.png
+
+# Office lock files (e.g. presentation/~$VaR_MENA.pptx)
+~$*
