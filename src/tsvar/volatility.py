@@ -20,6 +20,8 @@ from tsvar.var import ForecastResult
 
 
 def walk_forward_garch(train, test, p=1, q=1) -> ForecastResult:
+    if p != 1 or q != 1:
+        raise ValueError("walk_forward_garch supports only p=q=1")
     # Fit ONCE on training data (constant-mean GARCH(p,q)). Reset the index
     # to a plain RangeIndex before fitting: `train`/`test` come from
     # `train_test_returns` with a DatetimeIndex that carries no freq, which
@@ -52,5 +54,5 @@ def walk_forward_garch(train, test, p=1, q=1) -> ForecastResult:
         std_resid=std_resid,
         y_true=test.values,
         dates=test.index,
-        name=getattr(test, "name", "series"),
+        name=getattr(test, "name", None) or "series",
     )

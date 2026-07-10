@@ -39,6 +39,7 @@ def basel_zone(n_viol, n_obs, alpha) -> str:
     scaled = n_viol*(250/n_obs)                 # normalize to 250-day window
     if alpha==0.01:
         return "green" if scaled<=4 else "yellow" if scaled<=9 else "red"
+    # alpha=0.05: heuristic bands (not an official Basel traffic-light table; official table defined at 99%)
     return "green" if scaled<=17 else "yellow" if scaled<=25 else "red"
 
 def backtest_summary(y_true, var_levels, alpha) -> dict:

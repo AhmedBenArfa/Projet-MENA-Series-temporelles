@@ -9,7 +9,6 @@ ForecastResult / BHS-VaR interface used by every other model.
 """
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -63,7 +62,12 @@ def walk_forward_dl(train, test, kind, window=10, epochs=30) -> ForecastResult:
     z = (train.values - mu_) / sd_
     X, y = make_sequences(z, window)
 
-    model = _ANN(window) if kind == "ann" else _LSTM(window)
+    if kind == "ann":
+        model = _ANN(window)
+    elif kind == "lstm":
+        model = _LSTM(window)
+    else:
+        raise ValueError(kind)
     model = _train(model, X, y, epochs)
     model.eval()
 
