@@ -12,3 +12,6 @@ outputs/*.csv
 # OS
 Thumbs.db
 .DS_Store
+
+# Notebook-generated scratch figures (embedded inline in notebooks)
+outputs/figures/nb_*.png
