@@ -3,7 +3,14 @@
 Generates fresh figures under outputs/figures/ (prefixed ``deck_``) and
 assembles presentation/VaR_MENA.pptx with python-pptx. All numbers shown
 on data slides are read live from outputs/results.csv and
-outputs/best_per_index.csv -- nothing here is hand-typed from memory.
+outputs/best_per_index.csv, or computed live from the data (ADF/KPSS,
+GARCH sigma_t, ACF/PACF) -- nothing here is hand-typed from memory.
+
+This is the detailed, teaching version of the deck: every time-series
+concept used in the pipeline (decomposition, stationarity, ACF/PACF, the
+lag operator and differencing, ARIMA/SARIMA, ARCH/GARCH, ML/DL forecasters,
+BHS-VaR, backtesting) gets its own explained slide, grounded in the course
+notions (Time Series 1GAMMA).
 
 Run:
     "C:/Users/Mega-pc/anaconda3/python.exe" scripts/build_deck.py
@@ -25,6 +32,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.seasonal import seasonal_decompose
 
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -33,7 +42,10 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 
-from tsvar.data import train_test_returns, INDEX_FILES, MENA, BENCHMARKS, load_index
+from tsvar.data import (
+    train_test_returns, INDEX_FILES, MENA, BENCHMARKS, load_index,
+    adf_test, kpss_test,
+)
 from tsvar.volatility import walk_forward_garch
 from tsvar.deep import walk_forward_dl
 from tsvar.var import var_series
@@ -101,14 +113,81 @@ def gen_returns_clustering(index_name="Tunindex"):
     return path
 
 
-def gen_garch_var(index_name="Tunindex", alpha=0.01):
-    """GARCH BHS-VaR with violations on the test set (train-once, walk-forward)."""
+def gen_decompose(index_name="ADI", period=21):
+    """Illustrative additive decomposition Y = T + S + resid of the PRICE
+    level (not the returns -- returns are already ~stationary, prices are
+    not, which is exactly the point this slide makes). period=21 trading
+    sessions ~ one calendar month, used only to expose the technique
+    (moving-average trend + seasonal averages), not as a modelling step in
+    the actual VaR pipeline."""
+    df = load_index(DATA / INDEX_FILES[index_name])
+    price = df["Price"]
+    dec = seasonal_decompose(price, model="additive", period=period, extrapolate_trend="freq")
+    fig, axes = plt.subplots(4, 1, figsize=(7.6, 6.2), sharex=True)
+    axes[0].plot(price.index, price.values, color="#0E2A3D", lw=0.8)
+    axes[0].set_ylabel("Prix Y_t", fontsize=9)
+    axes[1].plot(dec.trend.index, dec.trend.values, color="#C9982D", lw=1.1)
+    axes[1].set_ylabel("Tendance T_t", fontsize=9)
+    axes[2].plot(dec.seasonal.index, dec.seasonal.values, color="#5A6B78", lw=0.6)
+    axes[2].set_ylabel("Saisonnalité S_t", fontsize=9)
+    axes[3].plot(dec.resid.index, dec.resid.values, color="#AE392F", lw=0.5)
+    axes[3].set_ylabel("Résidu e_t", fontsize=9)
+    axes[0].set_title(f"Décomposition illustrative -- prix {index_name} (période={period} séances)", fontsize=11)
+    for ax in axes:
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.tick_params(labelsize=8)
+    fig.tight_layout()
+    path = FIG / "deck_decompose.png"
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return path
+
+
+def gen_acf_pacf(index_name="ADI", nlags=30):
+    """ACF/PACF of the log-returns -- used to read off candidate (p, q)."""
+    tr, te = train_test_returns(index_name, DATA)
+    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.5))
+    plot_acf(tr.values, lags=nlags, ax=axes[0])
+    plot_pacf(tr.values, lags=nlags, ax=axes[1], method="ywm")
+    axes[0].set_title(f"ACF -- rendements {index_name}", fontsize=11)
+    axes[1].set_title(f"PACF -- rendements {index_name}", fontsize=11)
+    for ax in axes:
+        ax.set_xlabel("décalage (jours)", fontsize=9)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    path = FIG / "deck_acf_pacf.png"
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return path
+
+
+def gen_garch_figs(index_name="Tunindex", alpha=0.01):
+    """Fit GARCH(1,1) ONCE (train-once / walk-forward) and derive both the
+    conditional-volatility figure (sigma_t) and the BHS-VaR-with-violations
+    figure from the SAME walk-forward pass."""
     tr, te = train_test_returns(index_name, DATA)
     fc = walk_forward_garch(tr, te)
     v = var_series(fc, alpha)
     n_viol = int(np.sum(fc.y_true < v))
     rate = n_viol / len(fc.y_true)
 
+    # -- sigma_t (conditional volatility) --
+    fig, ax = plt.subplots(figsize=(10, 3.2))
+    ax.plot(fc.dates, fc.sigma, color="#0E2A3D", lw=1.3)
+    ax.fill_between(fc.dates, 0, fc.sigma, color="#C9982D", alpha=0.25)
+    ax.set_title(f"Volatilité conditionnelle GARCH(1,1) -- sigma_t, {index_name} (test)", fontsize=12)
+    ax.set_ylabel("sigma_t (%)")
+    ax.margins(x=0.01)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    path_sigma = FIG / "deck_garch_sigma.png"
+    fig.savefig(path_sigma, dpi=120)
+    plt.close(fig)
+
+    # -- BHS VaR + violations --
     fig, ax = plt.subplots(figsize=(11, 3.2))
     ax.plot(fc.dates, fc.y_true, label="rendement réalisé", lw=0.8, color="#5A6B78")
     ax.plot(fc.dates, v, label=f"VaR GARCH ({int((1-alpha)*100)}%)", color="#AE392F", lw=1.3)
@@ -122,10 +201,11 @@ def gen_garch_var(index_name="Tunindex", alpha=0.01):
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     fig.tight_layout()
-    path = FIG / "deck_garch_var_tunindex.png"
-    fig.savefig(path, dpi=120)
+    path_var = FIG / "deck_garch_var_tunindex.png"
+    fig.savefig(path_var, dpi=120)
     plt.close(fig)
-    return path, n_viol, rate
+
+    return path_var, n_viol, rate, path_sigma
 
 
 def gen_adi_lstm_vs_garch(alpha=0.01):
@@ -373,12 +453,20 @@ def build():
     best = pd.read_csv(BEST_CSV)
 
     fig_returns = gen_returns_clustering("Tunindex")
-    fig_garch, garch_nviol, garch_rate = gen_garch_var("Tunindex", 0.01)
+    fig_decompose = gen_decompose("ADI", period=21)
+    fig_acf_pacf = gen_acf_pacf("ADI", nlags=30)
+    fig_garch, garch_nviol, garch_rate, fig_garch_sigma = gen_garch_figs("Tunindex", 0.01)
     fig_adi = gen_adi_lstm_vs_garch(0.01)
     fig_heat = gen_winner_heatmap()
 
+    # -- live stationarity diagnostics (Tunindex): price level vs log-returns --
+    price_tunindex = load_index(DATA / INDEX_FILES["Tunindex"])["Price"]
+    ret_tunindex, _te_ret = train_test_returns("Tunindex", DATA)
+    adf_price, kpss_price = adf_test(price_tunindex), kpss_test(price_tunindex)
+    adf_ret, kpss_ret = adf_test(ret_tunindex), kpss_test(ret_tunindex)
+
     prs = new_presentation()
-    TOTAL = 17
+    TOTAL = 31
     page = [0]
 
     def track(slide):
@@ -405,7 +493,7 @@ def build():
     r.font.name = FONT_HEAD; r.font.color.rgb = NAVY_DARK
     add_text(s, Inches(1.0), Inches(6.75), Inches(8), Inches(0.5),
               "Tunindex - ADI - MASI - TASI  |  repères : CAC40, S&P 500", size=12, color=SAND)
-    add_text(s, Inches(10.2), Inches(6.75), Inches(2.5), Inches(0.5), "jensbenarfa@gmail.com",
+    add_text(s, Inches(10.2), Inches(6.75), Inches(2.5), Inches(0.5), "ahmedbenarfa.1992@gmail.com",
               size=11, color=GOLD_LIGHT, align=PP_ALIGN.RIGHT)
 
     # ---------------- Slide 2: Contexte & problématique --------------------
@@ -427,9 +515,29 @@ def build():
     ], size=13.5, bullet="›", anchor=MSO_ANCHOR.MIDDLE)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 3: Données & indices ---------------------------
+    # ---------------- Slide 3: Objectifs & démarche -------------------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 2, "Données", "Données et indices")
+    add_kicker_and_title(s, 2, "Démarche", "Objectifs et démarche du projet")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(7.2), Inches(4.9), [
+        "1. Nettoyer les données brutes (prix, volumes) et construire des rendements log stationnaires.",
+        "2. Analyser la structure temporelle des séries : décomposition, stationnarité (ADF/KPSS), autocorrélations (ACF/PACF).",
+        "3. Modéliser la moyenne conditionnelle (ARIMA/SARIMA) et la variance conditionnelle (GARCH).",
+        "4. Comparer à des approches Machine Learning (Random Forest, XGBoost) et Deep Learning (ANN, LSTM) sur le même problème de prévision.",
+        "5. Calculer la VaR (Bootstrap Historical Simulation) pour les 7 modèles, à 95% et 99%, en walk-forward strict.",
+        "6. Valider chaque modèle a posteriori par backtesting (Kupiec, Christoffersen, zones de Bâle).",
+    ], size=14.5)
+    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.6), NAVY)
+    add_text(s, Inches(8.75), Inches(1.95), Inches(3.7), Inches(0.4), "3 FAMILLES DE MODÈLES", size=12, bold=True, color=GOLD_LIGHT)
+    add_bullets(s, Inches(8.75), Inches(2.45), Inches(3.7), Inches(3.7), [
+        "Statistique : ARIMA, SARIMA, GARCH -- fondés sur la théorie des séries temporelles.",
+        "Machine Learning : Random Forest, XGBoost -- apprentissage supervisé sur des rendements retardés (lags).",
+        "Deep Learning : ANN (perceptron multicouche), LSTM (réseau récurrent à mémoire) -- séquences de rendements.",
+    ], size=13, color=SAND, bullet="›")
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 4: Données & indices ---------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 3, "Données", "Données et indices")
     headers = ["Indice", "Pays / place", "Période (train)", "Période (test)"]
     rows = [
         ["Tunindex", "Tunisie", "2005-01-03 -> 2014-12-31", "2014-12-31 -> 2015-08-20"],
@@ -454,18 +562,364 @@ def build():
               size=14.5, color=NAVY, bold=True, line_spacing=1.2, anchor=MSO_ANCHOR.MIDDLE)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 4: Méthodologie / pipeline ----------------------
+    # ---------------- Slide 5: Prétraitement & rendements log ---------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 3, "Méthodologie", "Pipeline unifié : train-once / walk-forward")
+    add_kicker_and_title(s, 4, "Prétraitement", "Prétraitement et rendements logarithmiques")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.9), Inches(3.0), [
+        "Prix nettoyés (virgules, unités M/K du volume) : conversion en série numérique exploitable Y_t = P_t (prix de clôture).",
+        "On travaille en rendements log plutôt qu'en prix : r_t = 100 x ln(P_t / P_{t-1}).",
+        "Pourquoi le log ? additivité dans le temps (somme de rendements = rendement cumulé), stabilisation de la variance, symétrie perte/gain, et rapprochement d'une distribution proche de la normale pour de petites variations.",
+        "Les rendements log sont approximativement stationnaires en moyenne -- condition nécessaire pour ARIMA/GARCH (voir slide suivante).",
+    ], size=14)
+    add_rect(s, Inches(8.0), Inches(1.75), Inches(4.7), Inches(2.3), NAVY)
+    add_text(s, Inches(8.25), Inches(1.95), Inches(4.2), Inches(0.35), "FORMULE", size=11, bold=True, color=GOLD_LIGHT)
+    add_text(s, Inches(8.25), Inches(2.35), Inches(4.2), Inches(1.5),
+              "r_t = 100 . ln(P_t / P_{t-1})",
+              size=19, bold=True, color=WHITE, font=FONT_HEAD, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_text(s, Inches(8.0), Inches(4.25), Inches(4.7), Inches(1.2),
+              "r_t en %, P_t = prix de clôture au jour t.\nToutes les places (MENA + repères) sont comparées sur cette même échelle.",
+              size=12, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 6: Analyse exploratoire -------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 5, "Analyse exploratoire", "Regroupement de volatilité (volatility clustering)")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(5.9), Inches(4.6), [
+        "En traçant les rendements log dans le temps, on observe des périodes calmes (petites variations) suivies de périodes agitées (grandes variations) qui s'enchaînent -- le regroupement de volatilité.",
+        "Ce phénomène signale une hétéroscédasticité conditionnelle : la variance de r_t dépend du passé récent, même si la moyenne, elle, reste globalement stable.",
+        "Une hypothèse i.i.d. ou un modèle à variance constante (OLS, ARMA classique) ne peut pas capter ce comportement -- c'est la motivation directe des modèles ARCH/GARCH (slides suivantes).",
+        "La ligne verticale marque la séparation train/test (walk-forward) : le clustering apparaît sur les deux périodes.",
+    ], size=14)
+    add_picture_framed(s, fig_returns, Inches(6.8), Inches(1.9), width=Inches(5.9))
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 7: Décomposition d'une série temporelle ---------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 6, "Décomposition", "Décomposition d'une série temporelle")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.1), Inches(4.9), [
+        "Modèle additif du cours : Y_t = T_t + S_t + e_t (tendance + saisonnalité + résidu).",
+        "Tendance T_t : estimée par moyenne mobile (lissage sur une fenêtre) ou par régression paramétrique (linéaire, polynomiale).",
+        "Saisonnalité S_t : estimée par moyennes saisonnières (moyenne par sous-période du cycle) ou par un modèle cosinus-sinus (régression harmonique).",
+        "On retire T_t et S_t du signal pour obtenir un résidu plus proche d'un processus stationnaire, modélisable par ARMA.",
+        "Ici (illustratif) : décomposition du PRIX d'ADI, période=21 séances (~1 mois). Les rendements log, eux, n'ont pas de tendance/saisonnalité forte -- c'est pourquoi on modélise directement les rendements plutôt que les prix décomposés.",
+    ], size=13)
+    add_picture_framed(s, fig_decompose, Inches(7.15), Inches(1.55), width=Inches(5.55))
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 8: Stationnarité -- définition & importance -----
+    s = track(blank_slide(prs)); set_background(s, NAVY)
+    add_kicker_and_title(s, 7, "Stationnarité", "Stationnarité : définition et importance", dark=True)
+    add_bullets(s, Inches(1.0), Inches(1.9), Inches(5.6), Inches(4.6), [
+        "Stationnarité stricte : la distribution jointe de (Y_t1,...,Y_tk) est invariante par translation dans le temps.",
+        "Stationnarité faible (du second ordre) : moyenne E[Y_t] constante, variance Var(Y_t) constante, et autocovariance Cov(Y_t, Y_t-h) qui ne dépend que du décalage h -- pas de t.",
+        "C'est la condition faible qui est utilisée en pratique pour les modèles AR / MA / ARMA.",
+        "Pourquoi c'est indispensable : sans stationnarité, les estimateurs (moyenne, variance, autocorrélations) ne convergent pas vers des quantités stables -- les prévisions et les tests d'hypothèses perdent leur sens.",
+    ], size=15, color=SAND)
+    add_rect(s, Inches(7.1), Inches(1.9), Inches(5.6), Inches(4.6), NAVY_DARK)
+    add_text(s, Inches(7.35), Inches(2.1), Inches(5.1), Inches(0.4), "3 CONDITIONS (FAIBLE)", size=12, bold=True, color=GOLD_LIGHT)
+    add_bullets(s, Inches(7.35), Inches(2.6), Inches(5.1), Inches(3.7), [
+        "E[Y_t] = mu, constante dans le temps.",
+        "Var(Y_t) = sigma^2, constante dans le temps.",
+        "Cov(Y_t, Y_t-h) = gamma(h), fonction de h uniquement.",
+        "-> Une série de prix (marche aléatoire) viole typiquement les 3 conditions ; une série de rendements log les respecte approximativement.",
+    ], size=14, color=SAND, bullet="›")
+    add_footer(s, page[0], TOTAL, dark=True)
+
+    # ---------------- Slide 9: Tests ADF & KPSS -----------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 8, "Tests de stationnarité", "Tests ADF et KPSS : prix vs rendements")
+    add_bullets(s, MARGIN, Inches(1.7), Inches(12.1), Inches(1.75), [
+        "ADF (Augmented Dickey-Fuller) : H0 = racine unitaire (série NON stationnaire). Si p < 0.05, on rejette H0 -> série stationnaire en moyenne.",
+        "KPSS : hypothèse inverse -- H0 = série stationnaire. Si p > 0.05, on ne rejette pas H0 -> cohérent avec la stationnarité.",
+        "Les deux tests peuvent diverger : KPSS est sensible à l'hétéroscédasticité (variance non constante), pas seulement à une tendance déterministe.",
+    ], size=13.5)
+    adf_price_ok = adf_price["stationary"]; kpss_price_ok = kpss_price["stationary"]
+    adf_ret_ok = adf_ret["stationary"]; kpss_ret_ok = kpss_ret["stationary"]
+    headers = ["Série (Tunindex)", "ADF stat", "ADF p", "Concl. ADF", "KPSS stat", "KPSS p", "Concl. KPSS"]
+    rows = [
+        ["Prix (niveau)", f"{adf_price['stat']:.2f}", f"{adf_price['pvalue']:.3f}",
+         "Oui" if adf_price_ok else "Non",
+         f"{kpss_price['stat']:.3f}", f"{kpss_price['pvalue']:.3f}",
+         "Oui" if kpss_price_ok else "Non"],
+        ["Rendements log", f"{adf_ret['stat']:.2f}", f"{adf_ret['pvalue']:.3f}",
+         "Oui" if adf_ret_ok else "Non",
+         f"{kpss_ret['stat']:.3f}", f"{kpss_ret['pvalue']:.3f}",
+         "Oui" if kpss_ret_ok else "Non"],
+    ]
+    colors = [
+        [None, None, None, (GREEN if adf_price_ok else RED), None, None, (GREEN if kpss_price_ok else RED)],
+        [None, None, None, (GREEN if adf_ret_ok else RED), None, None, (GREEN if kpss_ret_ok else RED)],
+    ]
+    add_table(s, MARGIN, Inches(3.6), Inches(12.1), Inches(1.4), headers, rows,
+              cell_colors=colors, size=10.5,
+              col_widths=[Inches(2.9), Inches(1.5), Inches(1.4), Inches(1.7), Inches(1.5), Inches(1.4), Inches(1.7)])
+    add_text(s, MARGIN, Inches(5.25), Inches(12.1), Inches(1.6),
+              "Lecture : sur les PRIX, ADF et KPSS concordent -- série non stationnaire (marche aléatoire). Sur les RENDEMENTS LOG, ADF rejette nettement la racine unitaire (stationnaire en moyenne, p=0.000), mais KPSS reste significatif (p=0.015) : la variance des rendements n'est pas constante (regroupement de volatilité, slide 6), ce que KPSS détecte. C'est exactement pourquoi la moyenne est modélisée par ARIMA (d=0) et la variance, séparément, par GARCH.",
+              size=12.5, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 10: ACF & PACF ----------------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 9, "Identification", "ACF et PACF : identifier les ordres (p, q)")
+    add_bullets(s, MARGIN, Inches(1.7), Inches(12.1), Inches(1.5), [
+        "ACF (autocorrélogramme) : corrélation entre Y_t et Y_t-h pour chaque décalage h -- utile pour repérer l'ordre q d'une MA (décroissance brutale après q).",
+        "PACF (autocorrélation partielle) : corrélation entre Y_t et Y_t-h après avoir retiré l'effet des décalages intermédiaires -- utile pour repérer l'ordre p d'un AR (coupure nette après p).",
+    ], size=14)
+    add_picture_framed(s, fig_acf_pacf, Inches(2.65), Inches(3.05), width=Inches(8.0))
+    add_text(s, Inches(2.65), Inches(6.25), Inches(8.0), Inches(0.6),
+              "Sur les rendements ADI : peu de décalages sortent des bandes de confiance -- cohérent avec des rendements proches d'un bruit blanc en moyenne (ordre p, q faibles), la structure prévisible se logeant surtout dans la variance (GARCH).",
+              size=11, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 11: Non-stationnarité -- opérateur retard -------
+    s = track(blank_slide(prs)); set_background(s, NAVY)
+    add_kicker_and_title(s, 10, "Non-stationnarité", "L'opérateur retard B et la différenciation", dark=True)
+    card = add_rect(s, Inches(1.2), Inches(2.0), Inches(10.9), Inches(1.7), NAVY_DARK)
+    add_text(s, Inches(1.2), Inches(2.2), Inches(10.9), Inches(1.3),
+              "B . Y_t = Y_{t-1}          (1 - B) . Y_t = Y_t - Y_{t-1} = diff_t",
+              size=20, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER)
+    add_bullets(s, Inches(1.2), Inches(4.0), Inches(10.9), Inches(3.0), [
+        "L'opérateur retard B décale la série d'une période : B^k . Y_t = Y_t-k.",
+        "La différenciation ∇ = (1 - B) élimine une tendance stochastique (marche aléatoire) : si Y_t est non stationnaire, ∇Y_t peut le devenir.",
+        "L'ordre d'intégration d est le nombre de différenciations nécessaires pour stationnariser la série -- d'où la notation ARIMA(p, d, q) : AR(p) + I(d) + MA(q).",
+        "SARIMA(p, d, q)(P, D, Q, m) ajoute une différenciation et des ordres saisonniers sur une périodicité m (ex. m=5 pour un cycle hebdomadaire de séances boursières).",
+        "Dans ce projet : les rendements log sont déjà stationnaires (d=0) -- la différenciation formelle a été évitée en modélisant directement r_t plutôt que P_t.",
+    ], size=14, color=SAND)
+    add_footer(s, page[0], TOTAL, dark=True)
+
+    # ---------------- Slide 12: ARIMA(p,d,q) en détail ----------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 11, "Modèles statistiques", "ARIMA(p, d, q) en détail")
+    add_bullets(s, MARGIN, Inches(1.7), Inches(7.3), Inches(4.7), [
+        "AR(p) -- partie autorégressive : Y_t = c + phi_1 Y_t-1 + ... + phi_p Y_t-p + eps_t (la valeur dépend de p valeurs passées).",
+        "I(d) -- partie intégrée : nombre de différenciations pour rendre la série stationnaire (ici d=0, rendements déjà stationnaires).",
+        "MA(q) -- partie moyenne mobile : eps_t = u_t + theta_1 u_t-1 + ... + theta_q u_t-q (l'erreur dépend de q chocs passés).",
+        "ARIMA(p,d,q) combine les trois : la moyenne conditionnelle de r_t est expliquée par ses propres retards et par les erreurs passées.",
+        "Mise en oeuvre ici : ajustement UNE seule fois sur le train (via auto_arima / ordre fixé), puis prévision walk-forward one-step-ahead sur le test, sans jamais ré-estimer les paramètres.",
+        "sigma est l'écart-type des résidus du train ; la VaR est calculée par BHS à partir de (mu_t, sigma) -- voir slide VaR.",
+    ], size=13.5)
+    tasi_arima = res[(res["index"] == "TASI") & (res.model == "ARIMA") & (res.alpha == 0.01)].iloc[0]
+    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.65), NAVY)
+    add_text(s, Inches(8.75), Inches(2.0), Inches(3.7), Inches(0.4), "TASI -- ARIMA @ 99%", size=13, bold=True, color=GOLD_LIGHT)
+    add_text(s, Inches(8.75), Inches(2.55), Inches(3.7), Inches(1.0), f"{tasi_arima.observed_rate:.2%}",
+              size=44, bold=True, color=WHITE, font=FONT_HEAD)
+    add_text(s, Inches(8.75), Inches(3.55), Inches(3.7), Inches(0.4), "taux de violation observé (cible 1%)", size=11, color=SAND)
+    add_text(s, Inches(8.75), Inches(4.15), Inches(3.7), Inches(0.4),
+              f"Kupiec p = {tasi_arima.kupiec_p:.3f}   |   zone {tasi_arima.basel_zone.upper()}",
+              size=12, color=GOLD_LIGHT, bold=True)
+    add_text(s, Inches(8.75), Inches(4.7), Inches(3.7), Inches(1.5),
+              "Zone verte Bâle : le modèle n'est pas rejeté. ARIMA est le modèle GAGNANT sur TASI (Arabie Saoudite) à 99%.",
+              size=11.5, color=SAND, italic=True)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 13: SARIMA --------------------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 12, "Modèles statistiques", "SARIMA : la composante saisonnière")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(11.7), Inches(2.1), [
+        "SARIMA(p,d,q)(P,D,Q,m) ajoute à ARIMA une structure autorégressive/moyenne-mobile saisonnière d'ordre (P,D,Q) sur une périodicité m.",
+        "Ici m=5 : cycle hebdomadaire des séances boursières (5 jours ouvrés), motivé par un éventuel effet de calendrier (lundi/vendredi) dans les rendements.",
+        "Ordre retenu dans le pipeline : SARIMA(1,0,1)(1,0,1,5) -- un AR et un MA à la fois non saisonniers et saisonniers, sans différenciation (d=D=0).",
+    ], size=14.5)
+    add_rect(s, Inches(1.6), Inches(4.15), Inches(10.1), Inches(1.3), NAVY)
+    add_text(s, Inches(1.6), Inches(4.35), Inches(10.1), Inches(0.9),
+              "SARIMA(1,0,1) x (1,0,1,5)",
+              size=22, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_text(s, MARGIN, Inches(5.75), Inches(12.1), Inches(1.0),
+              "Comme pour ARIMA : ajustement UNE fois sur le train, walk-forward one-step-ahead sur le test (aucun ré-entraînement), VaR calculée par BHS à partir de (mu, sigma) des résidus.",
+              size=13, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 14: Hétéroscédasticité (motivation GARCH) -------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 13, "Volatilité", "Hétéroscédasticité conditionnelle : la motivation du GARCH")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.3), Inches(4.7), [
+        "Hétéroscédasticité conditionnelle : la variance de l'erreur au temps t, conditionnée à l'information passée, n'est PAS constante (contrairement à l'hypothèse d'homoscédasticité d'ARMA/OLS classiques).",
+        "Symptôme observé (slide 6) : regroupement de volatilité -- périodes calmes et agitées qui s'enchaînent, incompatible avec Var(eps_t) = sigma^2 fixe.",
+        "Modèle ARCH (Engle, 1982) : la variance dépend des carrés des chocs passés -- sigma^2_t = omega + somme alpha_i . eps^2_t-i.",
+        "Limite de l'ARCH : il faut souvent beaucoup de retards (q élevé) pour bien capter la mémoire de la volatilité -- le GARCH résout cela avec un terme autorégressif sur la variance elle-même (slide suivante).",
+    ], size=14)
+    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(2.6), NAVY)
+    add_text(s, Inches(8.75), Inches(1.95), Inches(3.7), Inches(0.4), "ARCH(q)", size=12, bold=True, color=GOLD_LIGHT)
+    add_text(s, Inches(8.75), Inches(2.4), Inches(3.7), Inches(1.6),
+              "sigma^2_t = omega\n+ somme_{i=1}^{q} alpha_i eps^2_{t-i}",
+              size=15, bold=True, color=WHITE, font=FONT_HEAD, line_spacing=1.2)
+    add_text(s, Inches(8.5), Inches(4.55), Inches(4.2), Inches(1.9),
+              "eps_t : choc (résidu) au temps t. La variance conditionnelle réagit à l'amplitude des chocs récents -- exactement le mécanisme du regroupement de volatilité.",
+              size=12, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 15: GARCH(1,1) -- équation + sigma_t -----------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 14, "Volatilité", "GARCH(1,1) : la variance conditionnelle")
+    card = add_rect(s, Inches(1.6), Inches(1.55), Inches(10.1), Inches(0.85), NAVY)
+    add_text(s, Inches(1.6), Inches(1.68), Inches(10.1), Inches(0.6),
+              "sigma^2_t = omega + alpha . eps^2_{t-1} + beta . sigma^2_{t-1}",
+              size=19, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_bullets(s, MARGIN, Inches(2.55), Inches(12.1), Inches(1.3), [
+        "omega > 0 : variance de long terme (plancher) ; alpha : poids du choc récent (eps^2_{t-1}) ; beta : persistance de la volatilité passée (sigma^2_{t-1}). alpha + beta proche de 1 -> mémoire longue de la volatilité.",
+        "Ajusté UNE fois sur le train (moyenne constante + GARCH(1,1)), puis sigma_t est propagé jour par jour sur le test avec (omega, alpha, beta) FIGÉS -- seul l'état (dernier choc, dernière variance) est mis à jour.",
+    ], size=12.5)
+    garch_sigma_w = 7.2
+    garch_sigma_h = garch_sigma_w * (3.2 / 10.0)
+    garch_sigma_left = Inches((13.333 - garch_sigma_w) / 2)
+    garch_sigma_top = 3.95
+    add_picture_framed(s, fig_garch_sigma, garch_sigma_left, Inches(garch_sigma_top), width=Inches(garch_sigma_w))
+    add_text(s, garch_sigma_left, Inches(garch_sigma_top + garch_sigma_h + 0.12), Inches(garch_sigma_w), Inches(0.4),
+              "sigma_t varie jour après jour sur le test -- c'est ce profil dynamique qui distingue GARCH d'un modèle à volatilité constante.",
+              size=10.5, italic=True, color=NAVY, align=PP_ALIGN.CENTER)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 16: GARCH -- VaR & FHS ---------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 15, "Volatilité", "GARCH et simulation historique filtrée (FHS)")
+    add_bullets(s, MARGIN, Inches(1.7), Inches(12.1), Inches(1.35), [
+        "FHS (Filtered Historical Simulation) : on combine sigma_t (dynamique, GARCH) avec le pool de résidus standardisés du train, rééchantillonné par bootstrap pour obtenir la VaR (BHS).",
+        "Contrairement à une hypothèse gaussienne, FHS conserve la forme empirique (asymétrie, queues épaisses) de la distribution des chocs -- pertinent sur des marchés MENA souvent non gaussiens.",
+    ], size=13.5)
+    garch_img_top = 3.15
+    garch_img_w = 10.1
+    garch_img_h = garch_img_w * (3.2 / 11.0)  # matches gen_garch_figs figsize aspect ratio
+    add_picture_framed(s, fig_garch, Inches(1.6), Inches(garch_img_top), width=Inches(garch_img_w))
+    add_text(s, Inches(1.6), Inches(garch_img_top + garch_img_h + 0.15), Inches(10.1), Inches(0.5),
+              f"Tunindex, 99% : {garch_nviol} violations observées sur la période test ({garch_rate:.1%}) -- GARCH est le modèle gagnant sur Tunindex, ADI et MASI (3/4 indices MENA).",
+              size=11.5, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 17: Machine Learning -- features & RF -----------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 16, "Machine Learning", "Features (lags) et Random Forest")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.2), Inches(4.6), [
+        "Reformulation en apprentissage supervisé : les n_lags rendements passés (r_t-1, ..., r_t-n_lags) forment le vecteur de variables explicatives X_t, la cible y_t = r_t.",
+        "Random Forest : ensemble d'arbres de décision entraînés sur des sous-échantillons bootstrap des lags, moyennés pour la prévision (réduit la variance vs un arbre unique).",
+        "Entraîné UNE fois sur le train (n_lags=5), puis walk-forward sur le test en réinjectant le rendement réalisé (pas la prévision) dans la fenêtre de lags.",
+        "sigma constant = écart-type des résidus d'entraînement, combiné à mu (prévision de l'arbre) pour la VaR BHS -- même interface que tous les autres modèles.",
+        "Résultat empirique -- Random Forest est le modèle le plus FAIBLE du panel pour la VaR : il sur-viole systématiquement le seuil attendu (zone ROUGE Bâle sur les 4 indices MENA à 95%, et sur Tunindex/MASI/TASI à 99%).",
+    ], size=13.5)
+    rf_rows = []
+    for idx in MENA:
+        row = res[(res["index"] == idx) & (res.model == "RF") & (res.alpha == 0.01)].iloc[0]
+        rf_rows.append([idx, f"{row.observed_rate:.2%}", row.basel_zone.upper()])
+    add_text(s, Inches(8.4), Inches(1.75), Inches(4.3), Inches(0.35), "RF @ 99% -- taux de violation observé",
+              size=12, bold=True, color=NAVY)
+    add_table(s, Inches(8.4), Inches(2.15), Inches(4.3), Inches(2.2),
+              ["Indice", "Taux observé", "Zone Bâle"], rf_rows,
+              cell_colors=[[None, None, zone_color(r[2].lower())] for r in rf_rows],
+              col_widths=[Inches(1.7), Inches(1.5), Inches(1.1)])
+    rf_rates = [float(r[1].rstrip("%").replace(",", ".")) for r in rf_rows]
+    add_text(s, Inches(8.4), Inches(4.6), Inches(4.3), Inches(1.8),
+              f"Cible attendue : ~1%. Les taux observés ({min(rf_rates):.1f}-{max(rf_rates):.1f}%, "
+              "et jusqu'à 22% à 95%) sont très supérieurs -- Random Forest sous-estime largement le risque de queue.",
+              size=12, italic=True, color=RED, anchor=MSO_ANCHOR.TOP)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 18: XGBoost -------------------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 17, "Machine Learning", "XGBoost : boosting de gradient")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.4), Inches(4.6), [
+        "XGBoost construit ses arbres SÉQUENTIELLEMENT : chaque nouvel arbre corrige les erreurs (résidus) des arbres précédents (boosting de gradient), contrairement à RF (arbres indépendants, moyennés).",
+        "Hyperparamètres utilisés ici : 300 arbres, profondeur max 4, taux d'apprentissage 0.05 -- réglages volontairement conservateurs pour limiter le sur-apprentissage sur des rendements bruités.",
+        "Même protocole que RF : entraînement UNE fois sur le train (n_lags=5), walk-forward avec réinjection du rendement réalisé, sigma constant + mu prédit -> VaR BHS.",
+        "Résultat empirique : XGBoost se comporte nettement MIEUX que Random Forest -- moins de sur-violations -- mais reste en général derrière ARIMA/GARCH/ANN (zones vertes/jaunes selon l'indice), sans remporter de titre de meilleur modèle sur un indice MENA.",
+    ], size=14)
+    xgb_rows = []
+    for idx in MENA:
+        row = res[(res["index"] == idx) & (res.model == "XGB") & (res.alpha == 0.01)].iloc[0]
+        xgb_rows.append([idx, f"{row.observed_rate:.2%}", row.basel_zone.upper()])
+    add_text(s, Inches(8.4), Inches(1.75), Inches(4.3), Inches(0.35), "XGB @ 99% -- taux de violation observé",
+              size=12, bold=True, color=NAVY)
+    add_table(s, Inches(8.4), Inches(2.15), Inches(4.3), Inches(2.2),
+              ["Indice", "Taux observé", "Zone Bâle"], xgb_rows,
+              cell_colors=[[None, None, zone_color(r[2].lower())] for r in xgb_rows],
+              col_widths=[Inches(1.7), Inches(1.5), Inches(1.1)])
+    add_text(s, Inches(8.4), Inches(4.6), Inches(4.3), Inches(1.8),
+              "Comparé à RF : violations bien plus proches de la cible de 1% -- le boosting régularisé (profondeur faible, learning rate bas) limite le sur-apprentissage sur le bruit des rendements.",
+              size=12, italic=True, color=NAVY, anchor=MSO_ANCHOR.TOP)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 19: Deep Learning -- ANN -------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 18, "Deep Learning", "ANN : le perceptron multicouche")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.4), Inches(4.6), [
+        "Architecture : couche d'entrée de largeur = fenêtre (10 rendements standardisés), puis 32 -> 16 -> 1 neurones avec activations ReLU (perceptron multicouche, feedforward).",
+        "Les rendements sont standardisés (z = (r - mu_train) / sigma_train) avant d'entrer dans le réseau -- pratique standard en Deep Learning pour stabiliser l'apprentissage.",
+        "Entraînement UNE fois sur le train (30 époques, optimiseur Adam, perte MSE) ; en walk-forward, le réseau reçoit la fenêtre des 10 DERNIERS rendements réalisés et prédit le rendement du jour suivant -- les poids ne sont jamais mis à jour sur le test.",
+        "sigma = écart-type des résidus d'entraînement (converti en échelle de rendement) ; VaR calculée par BHS, strictement comparable aux 6 autres modèles.",
+        "Résultat empirique : ANN est bien calibré (zone verte) sur la quasi-totalité des couples indice/alpha, avec des MAE/RMSE proches de ceux d'ARIMA/GARCH -- mais ne les surpasse pas nettement.",
+    ], size=13.5)
+    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.6), WHITE)
+    add_text(s, Inches(8.75), Inches(1.95), Inches(3.7), Inches(0.4), "ARCHITECTURE ANN", size=12, bold=True, color=GOLD)
+    add_bullets(s, Inches(8.75), Inches(2.4), Inches(3.7), Inches(3.7), [
+        "Entrée : 10 rendements standardisés (fenêtre glissante).",
+        "Couche cachée 1 : 32 neurones, ReLU.",
+        "Couche cachée 2 : 16 neurones, ReLU.",
+        "Sortie : 1 neurone -- prévision du rendement du jour suivant.",
+        "30 époques, Adam (lr=1e-3), perte MSE.",
+    ], size=13, bullet="›", anchor=MSO_ANCHOR.MIDDLE)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 20: Deep Learning -- LSTM ------------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 19, "Deep Learning", "LSTM : mémoire court/long terme")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(6.4), Inches(4.7), [
+        "Le LSTM (Long Short-Term Memory) est un réseau récurrent conçu pour capter des DÉPENDANCES TEMPORELLES sur une séquence, au-delà d'une simple fenêtre de lags fixe.",
+        "Chaque cellule LSTM maintient un état interne (mémoire à long terme) régulé par 3 portes : porte d'oubli (quelle part de la mémoire passée on efface), porte d'entrée (quelle part de la nouvelle information on ajoute), porte de sortie (quelle part de l'état on expose comme sortie h_t).",
+        "Ici : la séquence des 10 derniers rendements (standardisés) est présentée à une couche LSTM (32 unités), suivie d'une couche dense (1 neurone) pour la prévision du rendement suivant.",
+        "Entraîné UNE fois (30 époques) puis walk-forward strict, comme ANN -- les gains attendus du LSTM viennent de sa capacité à pondérer différemment les rendements récents vs plus anciens dans la séquence (contrairement à un ARIMA linéaire à ordre fixe).",
+    ], size=13.5)
+    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.7), WHITE)
+    add_text(s, Inches(8.75), Inches(1.95), Inches(3.7), Inches(0.4), "ADI -- LSTM @ 99%", size=12, bold=True, color=GOLD)
+    adi_lstm = res[(res["index"] == "ADI") & (res.model == "LSTM") & (res.alpha == 0.01)].iloc[0]
+    add_text(s, Inches(8.75), Inches(2.4), Inches(3.7), Inches(0.9), f"{adi_lstm.observed_rate:.2%}",
+              size=38, bold=True, color=NAVY, font=FONT_HEAD)
+    add_text(s, Inches(8.75), Inches(3.25), Inches(3.7), Inches(0.4), "taux de violation observé", size=11, color=SLATE)
+    add_text(s, Inches(8.75), Inches(3.75), Inches(3.7), Inches(0.4),
+              f"zone {adi_lstm.basel_zone.upper()}  |  Kupiec p={adi_lstm.kupiec_p:.3f}", size=12, bold=True, color=GREEN)
+    add_text(s, Inches(8.75), Inches(4.35), Inches(3.7), Inches(1.9),
+              "Bien calibré, comparable à GARCH sur ADI -- mais pas distinctement supérieur (voir slide vérification de l'hypothèse).",
+              size=11.5, italic=True, color=NAVY)
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 21: La VaR -- définition & interprétation -------
+    s = track(blank_slide(prs)); set_background(s, NAVY)
+    add_kicker_and_title(s, 20, "La VaR", "La Value-at-Risk : définition et interprétation", dark=True)
+    add_bullets(s, Inches(1.0), Inches(1.9), Inches(11.3), Inches(1.9), [
+        "Définition : VaR_alpha(t) est le niveau de perte tel que P(r_t < VaR_alpha(t)) = alpha -- le quantile alpha de la distribution du rendement futur.",
+        "Interprétation à 99% : sur 100 jours, on s'attend à observer au plus ~1 jour où la perte réelle dépasse la VaR (une « violation »).",
+    ], size=15, color=SAND)
+    add_rect(s, Inches(1.0), Inches(4.0), Inches(11.3), Inches(2.9), NAVY_DARK)
+    add_text(s, Inches(1.25), Inches(4.2), Inches(10.8), Inches(0.4), "3 FAMILLES DE MÉTHODES DE CALCUL DE LA VaR", size=12, bold=True, color=GOLD_LIGHT)
+    add_bullets(s, Inches(1.25), Inches(4.7), Inches(10.8), Inches(2.0), [
+        "Paramétrique (delta-normale) : suppose une loi (souvent normale) pour les rendements -- rapide mais irréaliste sur des marchés à queues épaisses.",
+        "Simulation historique pure : rejoue directement les rendements passés -- simple mais rigide (poids égal à chaque jour passé, pas de dynamique de volatilité).",
+        "Simulation historique bootstrappée (BHS/FHS -- retenue ici) : combine une prévision dynamique (mu_t, sigma_t) du modèle avec un rééchantillonnage des résidus standardisés -- flexible et sans hypothèse de normalité.",
+    ], size=13.5, color=SAND, bullet="›")
+    add_footer(s, page[0], TOTAL, dark=True)
+
+    # ---------------- Slide 22: Calcul de la VaR par BHS (formule) ----------
+    s = track(blank_slide(prs)); set_background(s, NAVY)
+    add_kicker_and_title(s, 21, "Méthode de calcul", "Le calcul de la VaR par BHS", dark=True)
+    card = add_rect(s, Inches(1.6), Inches(2.1), Inches(10.1), Inches(1.9), NAVY_DARK)
+    add_text(s, Inches(1.6), Inches(2.35), Inches(10.1), Inches(1.5),
+              "VaR_alpha(t) = mu_t + sigma_t . Q_alpha( résidus standardisés bootstrappés )",
+              size=22, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER)
+    add_bullets(s, Inches(1.6), Inches(4.3), Inches(10.1), Inches(2.6), [
+        "mu_t, sigma_t : moyenne et écart-type prédits par le modèle (ARIMA, GARCH, RF/XGB, ANN/LSTM) pour le jour t.",
+        "résidus standardisés : pool des résidus (z-scores) estimés UNE fois sur la période d'entraînement.",
+        "Bootstrap : n_boot=10 000 tirages avec remise dans ce pool -> quantile empirique Q_alpha (alpha=5% ou 1%).",
+        "BHS (Bootstrap Historical Simulation) ne suppose pas la normalité des résidus : la distribution empirique (asymétrie, queues épaisses) est préservée -- adapté aux marchés MENA, souvent non-gaussiens.",
+    ], size=14, color=SAND)
+    add_footer(s, page[0], TOTAL, dark=True)
+
+    # ---------------- Slide 23: train-once / walk-forward one-step-ahead ----
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 22, "Méthodologie", "Pipeline unifié : train-once / walk-forward")
     steps = [
         ("1", "Entraînement unique", "Chaque modèle est ajusté UNE seule fois sur la période train (aucun ré-entraînement)."),
         ("2", "Walk-forward J+1", "Prévision un jour à l'avance sur le test ; les états (résidus, variance) sont mis à jour avec la valeur réalisée, pas les paramètres."),
         ("3", "VaR par BHS", "mu, sigma prédits + pool de résidus standardisés bootstrappés -> quantile alpha (VaR)."),
         ("4", "Backtesting", "Comparaison VaR vs rendement réalisé : Kupiec, Christoffersen, zones de Bâle."),
     ]
-    x0 = MARGIN
     w = Inches(2.85)
-    gap = Inches(0.18)
     for i, (num, head, desc) in enumerate(steps):
         left = Inches(0.6 + i * (2.85 + 0.18))
         card = add_rect(s, left, Inches(1.85), w, Inches(3.7), WHITE)
@@ -488,158 +942,39 @@ def build():
               size=13, italic=True, color=NAVY)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 5: Prétraitement & rendements log ---------------
+    # ---------------- Slide 24: Backtesting -- Kupiec (POF) -----------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 4, "Prétraitement", "Prétraitement et rendements logarithmiques")
-    add_bullets(s, MARGIN, Inches(1.75), Inches(5.6), Inches(3.2), [
-        "Prix nettoyés (virgules, unités M/K du volume) puis convertis en rendements log : r_t = 100 x ln(P_t / P_{t-1}).",
-        "Les rendements log stabilisent la variance et rendent les séries approximativement stationnaires en moyenne.",
-        "On observe un regroupement de volatilité (volatility clustering) : périodes calmes et périodes agitées s'enchaînent -- justifie l'usage du GARCH.",
-    ], size=15.5)
-    add_picture_framed(s, fig_returns, Inches(6.9), Inches(1.75), width=Inches(5.8))
-    add_footer(s, page[0], TOTAL)
-
-    # ---------------- Slide 6: Stationnarité & décomposition ----------------
-    s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 5, "Stationnarité", "Stationnarité (ADF / KPSS) et décomposition")
-    add_bullets(s, MARGIN, Inches(1.75), Inches(6.0), Inches(4.6), [
-        "Test ADF (racine unitaire) : H0 = série non-stationnaire. p < 0.05 -> on rejette H0 -> série stationnaire.",
-        "Test KPSS : H0 = série stationnaire. p > 0.05 -> on ne rejette pas H0 -> cohérent avec la stationnarité.",
-        "Sur les niveaux de prix : ADF ne rejette pas H0 (non-stationnaire), comportement typique d'une marche aléatoire.",
-        "Sur les rendements log : ADF rejette H0 et KPSS ne le rejette pas -- les deux tests concordent, la série est stationnaire.",
-        "La décomposition (tendance / saisonnalité / résidu) confirme l'absence de tendance forte sur les rendements, contrairement aux prix.",
-    ], size=14.5)
-    add_rect(s, Inches(8.3), Inches(1.75), Inches(4.4), Inches(3.3), WHITE)
-    add_text(s, Inches(8.55), Inches(1.95), Inches(4.0), Inches(0.4), "LECTURE ADF / KPSS", size=12, bold=True, color=GOLD)
-    add_bullets(s, Inches(8.55), Inches(2.4), Inches(3.9), Inches(2.5), [
-        "Prix : ADF p élevé, KPSS p faible -> non stationnaire.",
-        "Rendements : ADF p faible, KPSS p élevé -> stationnaire.",
-        "-> les modèles (ARIMA d=0 sur rendements, GARCH) sont appliqués sur des séries stationnaires, condition nécessaire à leur validité.",
-    ], size=13, bullet="›", anchor=MSO_ANCHOR.MIDDLE)
-    add_footer(s, page[0], TOTAL)
-
-    # ---------------- Slide 7: ARIMA / SARIMA -------------------------------
-    s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 6, "Modèles statistiques", "ARIMA et SARIMA")
-    add_bullets(s, MARGIN, Inches(1.75), Inches(6.1), Inches(4.6), [
-        "ARIMA(p,d,q) modélise la moyenne conditionnelle des rendements à partir de leurs valeurs passées et des erreurs passées.",
-        "SARIMA ajoute une composante saisonnière (ici m=5, cycle hebdomadaire de séances de bourse).",
-        "Les deux modèles sont ajustés UNE fois sur le train, puis utilisés en walk-forward one-step-ahead sur le test.",
-        "La VaR est ensuite calculée par BHS à partir de mu (prévision ARIMA/SARIMA) et sigma (écart-type des résidus).",
-        "Résultat empirique : ARIMA est le modèle GAGNANT sur TASI (Arabie Saoudite) à 99%.",
-    ], size=14.5)
-    tasi_arima = res[(res["index"] == "TASI") & (res.model == "ARIMA") & (res.alpha == 0.01)].iloc[0]
-    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.6), NAVY)
-    add_text(s, Inches(8.75), Inches(2.0), Inches(3.7), Inches(0.4), "TASI -- ARIMA @ 99%", size=13, bold=True, color=GOLD_LIGHT)
-    add_text(s, Inches(8.75), Inches(2.55), Inches(3.7), Inches(1.0), f"{tasi_arima.observed_rate:.2%}",
-              size=44, bold=True, color=WHITE, font=FONT_HEAD)
-    add_text(s, Inches(8.75), Inches(3.55), Inches(3.7), Inches(0.4), "taux de violation observé (cible 1%)", size=11, color=SAND)
-    add_text(s, Inches(8.75), Inches(4.15), Inches(3.7), Inches(0.4),
-              f"Kupiec p = {tasi_arima.kupiec_p:.3f}   |   zone {tasi_arima.basel_zone.upper()}",
-              size=12, color=GOLD_LIGHT, bold=True)
-    add_text(s, Inches(8.75), Inches(4.7), Inches(3.7), Inches(1.4),
-              "Zone verte Bâle : le modèle n'est pas rejeté, le nombre de violations est cohérent avec le seuil attendu.",
-              size=11.5, color=SAND, italic=True)
-    add_footer(s, page[0], TOTAL)
-
-    # ---------------- Slide 8: GARCH -----------------------------------------
-    s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 7, "Volatilité", "Volatilité GARCH et simulation historique filtrée (FHS)")
-    add_bullets(s, MARGIN, Inches(1.7), Inches(12.1), Inches(1.5), [
-        "GARCH(1,1) à moyenne constante, ajusté UNE fois sur le train ; la variance conditionnelle est ensuite propagée jour par jour sur le test avec les paramètres figés (omega, alpha, beta).",
-        "FHS (Filtered Historical Simulation) : on combine sigma_t (dynamique, GARCH) avec le pool de résidus standardisés du train, rééchantillonné pour la VaR (BHS).",
-    ], size=13.5)
-    garch_img_top = 3.15
-    garch_img_w = 10.1
-    garch_img_h = garch_img_w * (3.2 / 11.0)  # matches gen_garch_var figsize aspect ratio
-    add_picture_framed(s, fig_garch, Inches(1.6), Inches(garch_img_top), width=Inches(garch_img_w))
-    add_text(s, Inches(1.6), Inches(garch_img_top + garch_img_h + 0.15), Inches(10.1), Inches(0.5),
-              f"Tunindex, 99% : {garch_nviol} violations observées sur la période test ({garch_rate:.1%}) -- GARCH est le modèle gagnant sur Tunindex, ADI et MASI (3/4 indices MENA).",
-              size=11.5, italic=True, color=NAVY)
-    add_footer(s, page[0], TOTAL)
-
-    # ---------------- Slide 9: Machine Learning (RF/XGBoost) ----------------
-    s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 8, "Machine Learning", "Random Forest et XGBoost")
-    add_bullets(s, MARGIN, Inches(1.75), Inches(6.2), Inches(4.6), [
-        "Les rendements passés (fenêtre glissante de lags) forment les variables explicatives (approche supervisée).",
-        "RF et XGBoost sont entraînés UNE fois sur le train, puis prédisent J+1 en walk-forward sur le test.",
-        "sigma est estimé à partir de l'écart-type des résidus d'entraînement (constant), combiné à mu (prévision de l'arbre) pour la VaR BHS.",
-        "Résultat empirique -- Random Forest est le modèle le plus faible du panel pour la VaR : il sur-viole systématiquement le seuil attendu (zone ROUGE Bâle sur les 4 indices MENA à 95%, et sur Tunindex/MASI/TASI à 99%).",
-        "XGBoost se comporte mieux que RF mais reste en général derrière ARIMA/GARCH/ANN (zones vertes/jaunes selon l'indice).",
+    add_kicker_and_title(s, 23, "Validation", "Backtesting : le test de Kupiec (POF)")
+    add_bullets(s, MARGIN, Inches(1.75), Inches(11.9), Inches(1.7), [
+        "Principe (Proportion of Failures) : on compare le TAUX de violations observé (n_viol / n) au taux attendu alpha.",
+        "H0 : le taux de violation observé est statistiquement égal à alpha (le modèle est bien calibré).",
+        "Statistique de test : LR_POF = -2 [ (n-x) ln(1-alpha) + x ln(alpha) - (n-x) ln(1-pi_hat) - x ln(pi_hat) ], suit un chi^2(1) sous H0, avec pi_hat = x/n le taux observé.",
     ], size=14)
-    rf_rows = []
-    for idx in MENA:
-        row = res[(res["index"] == idx) & (res.model == "RF") & (res.alpha == 0.01)].iloc[0]
-        rf_rows.append([idx, f"{row.observed_rate:.2%}", row.basel_zone.upper()])
-    add_text(s, Inches(8.4), Inches(1.75), Inches(4.3), Inches(0.35), "RF @ 99% -- taux de violation observé",
-              size=12, bold=True, color=NAVY)
-    add_table(s, Inches(8.4), Inches(2.15), Inches(4.3), Inches(2.2),
-              ["Indice", "Taux observé", "Zone Bâle"], rf_rows,
-              cell_colors=[[None, None, zone_color(r[2].lower())] for r in rf_rows],
-              col_widths=[Inches(1.7), Inches(1.5), Inches(1.1)])
-    rf_rates = [float(r[1].rstrip("%").replace(",", ".")) for r in rf_rows]
-    add_text(s, Inches(8.4), Inches(4.6), Inches(4.3), Inches(1.8),
-              f"Cible attendue : ~1%. Les taux observés ({min(rf_rates):.1f}-{max(rf_rates):.1f}%, "
-              "et jusqu'à 22% à 95%) sont très supérieurs -- Random Forest sous-estime largement le risque de queue.",
-              size=12, italic=True, color=RED, anchor=MSO_ANCHOR.TOP)
+    add_rect(s, Inches(1.6), Inches(3.85), Inches(10.1), Inches(1.0), NAVY)
+    add_text(s, Inches(1.6), Inches(4.0), Inches(10.1), Inches(0.75),
+              "p-value > 0.05  ->  modèle NON rejeté (bien calibré)",
+              size=18, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_text(s, MARGIN, Inches(5.15), Inches(11.9), Inches(1.5),
+              "Limite du test de Kupiec : il ne regarde QUE le taux global de violations, pas leur répartition dans le temps -- un modèle peut avoir le bon nombre de violations mais toutes regroupées lors d'une même crise (violations non indépendantes). C'est ce que corrige le test de Christoffersen (slide suivante).",
+              size=13, italic=True, color=NAVY)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 10: Deep Learning (ANN/LSTM) --------------------
+    # ---------------- Slide 25: Backtesting -- Christoffersen & Bâle --------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 9, "Deep Learning", "Réseaux de neurones : ANN et LSTM")
-    add_bullets(s, MARGIN, Inches(1.75), Inches(6.3), Inches(4.7), [
-        "ANN (perceptron multicouche) et LSTM (mémoire court/long terme) sont entraînés UNE fois sur des séquences standardisées du train (fenêtre de 10 rendements).",
-        "En walk-forward, le réseau reçoit la fenêtre de rendements réalisés (pas re-simulés) et prédit le rendement du jour suivant ; les poids ne sont jamais mis à jour sur le test.",
-        "sigma est l'écart-type des résidus d'entraînement ; la VaR est calculée par BHS comme pour les autres modèles (comparabilité stricte entre les 7 approches).",
-        "Résultat empirique : ANN et LSTM sont bien calibrés (zone verte) sur la quasi-totalité des couples indice/alpha, avec des MAE/RMSE proches, voire légèrement meilleurs, que ceux d'ARIMA/GARCH.",
-        "Mais ils ne dominent pas nettement GARCH ou ARIMA en zone de Bâle -- aucun des deux réseaux ne remporte le titre de meilleur modèle sur un indice MENA (voir résultats, slide 13).",
-    ], size=13.5)
-    add_rect(s, Inches(8.5), Inches(1.75), Inches(4.2), Inches(4.7), WHITE)
-    add_text(s, Inches(8.75), Inches(1.95), Inches(3.7), Inches(0.4), "ADI -- LSTM @ 99%", size=12, bold=True, color=GOLD)
-    adi_lstm = res[(res["index"] == "ADI") & (res.model == "LSTM") & (res.alpha == 0.01)].iloc[0]
-    add_text(s, Inches(8.75), Inches(2.4), Inches(3.7), Inches(0.9), f"{adi_lstm.observed_rate:.2%}",
-              size=38, bold=True, color=NAVY, font=FONT_HEAD)
-    add_text(s, Inches(8.75), Inches(3.25), Inches(3.7), Inches(0.4), "taux de violation observé", size=11, color=SLATE)
-    add_text(s, Inches(8.75), Inches(3.75), Inches(3.7), Inches(0.4),
-              f"zone {adi_lstm.basel_zone.upper()}  |  Kupiec p={adi_lstm.kupiec_p:.3f}", size=12, bold=True, color=GREEN)
-    add_text(s, Inches(8.75), Inches(4.35), Inches(3.7), Inches(1.9),
-              "Bien calibré, comparable à GARCH sur ADI -- mais pas distinctement supérieur (voir slide 15, vérification de l'hypothèse).",
-              size=11.5, italic=True, color=NAVY)
-    add_footer(s, page[0], TOTAL)
-
-    # ---------------- Slide 11: VaR par BHS (formule) -----------------------
-    s = track(blank_slide(prs)); set_background(s, NAVY)
-    add_kicker_and_title(s, 10, "Méthode de calcul", "Le calcul de la VaR par BHS", dark=True)
-    card = add_rect(s, Inches(1.6), Inches(2.1), Inches(10.1), Inches(1.9), NAVY_DARK)
-    add_text(s, Inches(1.6), Inches(2.35), Inches(10.1), Inches(1.5),
-              "VaR_alpha(t) = mu_t + sigma_t . Q_alpha( résidus standardisés bootstrappés )",
-              size=22, bold=True, color=GOLD_LIGHT, font=FONT_HEAD, align=PP_ALIGN.CENTER)
-    add_bullets(s, Inches(1.6), Inches(4.3), Inches(10.1), Inches(2.6), [
-        "mu_t, sigma_t : moyenne et écart-type prédits par le modèle (ARIMA, GARCH, RF/XGB, ANN/LSTM) pour le jour t.",
-        "résidus standardisés : pool des résidus (z-scores) estimés UNE fois sur la période d'entraînement.",
-        "Bootstrap : n_boot=10 000 tirages avec remise dans ce pool -> quantile empirique Q_alpha (alpha=5% ou 1%).",
-        "BHS (Bootstrap Historical Simulation) ne suppose pas la normalité des résidus : la distribution empirique (asymétrie, queues épaisses) est préservée -- adapté aux marchés MENA, souvent non-gaussiens.",
-    ], size=14, color=SAND)
-    add_footer(s, page[0], TOTAL, dark=True)
-
-    # ---------------- Slide 12: Backtesting ---------------------------------
-    s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 11, "Validation", "Backtesting : Kupiec, Christoffersen, Bâle")
+    add_kicker_and_title(s, 24, "Validation", "Backtesting : Christoffersen et zones de Bâle")
     cols = [
-        ("Kupiec (POF)", "Teste si le TAUX de violations observé est cohérent avec alpha attendu. p > 0.05 -> modèle non rejeté."),
-        ("Christoffersen (indépendance + couverture)", "Teste en plus si les violations sont indépendantes dans le temps (pas de clusters de violations). p_cc > 0.05 -> modèle non rejeté."),
-        ("Zones de Bâle", "Classe le modèle en vert / jaune / rouge selon le nombre de violations normalisé sur 250 séances -- grille réglementaire standard."),
+        ("Christoffersen (indépendance + couverture)", "Ajoute au test de Kupiec un test d'INDÉPENDANCE des violations dans le temps (pas de clusters). LR_cc = LR_POF + LR_ind ~ chi^2(2). p_cc > 0.05 -> modèle non rejeté."),
+        ("Zones de Bâle", "Classe le modèle en vert / jaune / rouge selon le nombre de violations normalisé sur 250 séances -- grille réglementaire standard (verte <= 4 à 99%)."),
     ]
-    w = Inches(3.95)
+    w = Inches(5.9)
     for i, (head, desc) in enumerate(cols):
-        left = Inches(0.6 + i * (3.95 + 0.2))
-        add_rect(s, left, Inches(1.8), w, Inches(2.95), WHITE)
-        add_text(s, left + Inches(0.2), Inches(2.0), w - Inches(0.4), Inches(0.9), head,
+        left = Inches(0.6 + i * (5.9 + 0.3))
+        add_rect(s, left, Inches(1.8), w, Inches(2.85), WHITE)
+        add_text(s, left + Inches(0.25), Inches(2.0), w - Inches(0.5), Inches(0.9), head,
                   size=15, bold=True, color=NAVY, font=FONT_HEAD, line_spacing=1.05)
-        add_text(s, left + Inches(0.2), Inches(2.9), w - Inches(0.4), Inches(1.7), desc,
+        add_text(s, left + Inches(0.25), Inches(2.85), w - Inches(0.5), Inches(1.6), desc,
                   size=13, color=SLATE, line_spacing=1.2, anchor=MSO_ANCHOR.MIDDLE)
-    legend_y = Inches(5.1)
+    legend_y = Inches(4.95)
     for i, (zone, col, meaning) in enumerate([
         ("Vert", GREEN, "modèle non rejeté, risque bien capté"),
         ("Jaune", YELLOW, "zone de surveillance"),
@@ -650,11 +985,16 @@ def build():
         dot.fill.solid(); dot.fill.fore_color.rgb = col; dot.line.fill.background(); dot.shadow.inherit = False
         add_text(s, left + Inches(0.4), legend_y - Inches(0.03), Inches(3.6), Inches(0.4),
                   f"{zone} -- {meaning}", size=12.5, color=NAVY, bold=True)
+    tasi_c = res[(res["index"] == "TASI") & (res.model == "ARIMA") & (res.alpha == 0.01)].iloc[0]
+    add_text(s, MARGIN, Inches(5.55), Inches(12.1), Inches(1.3),
+              f"Exemple (TASI, ARIMA, 99%) : Kupiec p={tasi_c.kupiec_p:.3f}, Christoffersen p_cc={tasi_c.christoffersen_p:.3f}, "
+              f"zone {tasi_c.basel_zone.upper()} -- les deux tests concordent, le modèle n'est pas rejeté.",
+              size=13, italic=True, color=NAVY)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 13: Résultats par indice ------------------------
+    # ---------------- Slide 26: Résultats par indice ------------------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 12, "Résultats", "Résultats par indice -- le tableau des gagnants")
+    add_kicker_and_title(s, 25, "Résultats", "Résultats par indice -- le tableau des gagnants")
     headers = ["Indice", "Modèle gagnant", "Taux observé (99%)", "Kupiec p", "Zone Bâle"]
     rows = []
     colors = []
@@ -669,9 +1009,41 @@ def build():
     add_picture_framed(s, fig_heat, Inches(8.55), Inches(1.75), width=Inches(4.15))
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 14: MENA vs marchés développés ------------------
+    # ---------------- Slide 27: Lecture détaillée des résultats -------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 13, "Discussion", "MENA vs marchés développés (CAC40 / S&P 500)")
+    add_kicker_and_title(s, 26, "Résultats", "Lecture détaillée : les 7 modèles sur Tunindex")
+    models_order = ["ARIMA", "SARIMA", "GARCH", "RF", "XGB", "ANN", "LSTM"]
+    headers = ["Modèle", "Taux observé", "Kupiec p", "Christoffersen p", "Zone Bâle"]
+    rows, colors = [], []
+    for m in models_order:
+        row = res[(res["index"] == "Tunindex") & (res.model == m) & (res.alpha == 0.01)].iloc[0]
+        rows.append([m, f"{row.observed_rate:.2%}", f"{row.kupiec_p:.3f}", f"{row.christoffersen_p:.3f}", row.basel_zone.upper()])
+        colors.append([None, None, None, None, zone_color(row.basel_zone)])
+    add_table(s, MARGIN, Inches(1.75), Inches(8.2), Inches(3.0), headers, rows,
+              cell_colors=colors, col_widths=[Inches(1.5), Inches(1.7), Inches(1.6), Inches(2.0), Inches(1.4)])
+
+    rf_all = res[res.model == "RF"]
+    rf_red = int((rf_all.basel_zone == "red").sum())
+    ann_all = res[res.model == "ANN"]; lstm_all = res[res.model == "LSTM"]
+    ann_green = int((ann_all.basel_zone == "green").sum()); ann_total = len(ann_all)
+    lstm_green = int((lstm_all.basel_zone == "green").sum()); lstm_total = len(lstm_all)
+    add_text(s, MARGIN, Inches(5.1), Inches(8.2), Inches(1.9),
+              f"Random Forest : {rf_red}/{len(rf_all)} combinaisons (indice x alpha) en zone ROUGE -- modèle systématiquement trop optimiste sur le risque de queue, à éviter tel quel pour la VaR.\n"
+              f"ANN / LSTM : {ann_green}/{ann_total} et {lstm_green}/{lstm_total} combinaisons en zone VERTE respectivement -- bien calibrés, mais sans dominer nettement GARCH/ARIMA (voir tableau des gagnants).",
+              size=12.5, italic=True, color=NAVY, line_spacing=1.2)
+    add_rect(s, Inches(8.9), Inches(1.75), Inches(3.8), Inches(4.6), NAVY)
+    add_text(s, Inches(9.15), Inches(1.95), Inches(3.3), Inches(0.4), "À RETENIR", size=12, bold=True, color=GOLD_LIGHT)
+    add_bullets(s, Inches(9.15), Inches(2.4), Inches(3.3), Inches(3.8), [
+        "GARCH/ARIMA : compromis simplicité-robustesse, gagnants sur 4/4 indices.",
+        "ANN/LSTM : bien calibrés, compétitifs, mais pas dominants.",
+        "RF : sur-viole systématiquement -- inadapté en l'état.",
+        "XGB : meilleur que RF, sans dépasser les modèles statistiques.",
+    ], size=12.5, color=SAND, bullet="›")
+    add_footer(s, page[0], TOTAL)
+
+    # ---------------- Slide 28: MENA vs marchés développés ------------------
+    s = track(blank_slide(prs)); set_background(s, SAND)
+    add_kicker_and_title(s, 27, "Discussion", "MENA vs marchés développés (CAC40 / S&P 500)")
     add_bullets(s, MARGIN, Inches(1.75), Inches(6.3), Inches(4.6), [
         "Sur les marchés développés (CAC40, S&P 500), la littérature montre un avantage plus net des modèles GARCH/Deep Learning face aux chocs de volatilité (crises 2008, 2011).",
         "Sur les indices MENA de cette étude, les modèles ANN/LSTM égalent GARCH/ARIMA en calibration (zone verte) mais ne les surpassent pas nettement -- écart moins marqué qu'attendu.",
@@ -688,9 +1060,9 @@ def build():
     ], size=13, color=SAND, bullet="›", anchor=MSO_ANCHOR.MIDDLE)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 15: Vérification de l'hypothèse -----------------
+    # ---------------- Slide 29: Vérification de l'hypothèse -----------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 14, "Verdict", "Vérification de l'hypothèse : le LSTM sur ADI")
+    add_kicker_and_title(s, 28, "Verdict", "Vérification de l'hypothèse : le LSTM sur ADI")
     add_text(s, MARGIN, Inches(1.7), Inches(12.1), Inches(0.4),
               "Hypothèse testée : « le LSTM surpasse les modèles classiques sur l'indice ADI »",
               size=15, bold=True, color=NAVY)
@@ -705,9 +1077,9 @@ def build():
               size=12, color=WHITE, line_spacing=1.15)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 16: Conclusion & perspectives --------------------
+    # ---------------- Slide 30: Conclusion & perspectives --------------------
     s = track(blank_slide(prs)); set_background(s, SAND)
-    add_kicker_and_title(s, 15, "Conclusion", "Conclusion et perspectives")
+    add_kicker_and_title(s, 29, "Conclusion", "Conclusion et perspectives")
     add_bullets(s, MARGIN, Inches(1.75), Inches(6.3), Inches(4.7), [
         "GARCH est le modèle le plus robuste pour la VaR sur les indices MENA étudiés (3 indices gagnés sur 4).",
         "ARIMA reste compétitif et gagne sur TASI -- la simplicité n'est pas pénalisante ici.",
@@ -724,7 +1096,7 @@ def build():
     ], size=13, bullet="›", anchor=MSO_ANCHOR.MIDDLE)
     add_footer(s, page[0], TOTAL)
 
-    # ---------------- Slide 17: Merci / clôture -----------------------------
+    # ---------------- Slide 31: Merci / clôture -----------------------------
     s = track(blank_slide(prs)); set_background(s, NAVY)
     add_rect(s, Inches(0), Inches(0), SLIDE_W, Inches(0.15), GOLD)
     add_text(s, Inches(1.0), Inches(2.7), Inches(11.3), Inches(1.2), "Merci",
@@ -735,7 +1107,7 @@ def build():
     add_text(s, Inches(1.0), Inches(4.5), Inches(11.0), Inches(0.5),
               "Questions bienvenues -- code, données et résultats disponibles dans le dépôt du projet.",
               size=13, color=SAND)
-    add_text(s, Inches(1.0), Inches(6.75), Inches(8), Inches(0.4), "jensbenarfa@gmail.com",
+    add_text(s, Inches(1.0), Inches(6.75), Inches(8), Inches(0.4), "ahmedbenarfa.1992@gmail.com",
               size=12, color=SAND)
 
     n_slides = page[0]
