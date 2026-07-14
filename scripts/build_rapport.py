@@ -12,11 +12,14 @@ des chiffres réels dans les sections d'interprétation.
 
 Usage :
     "C:/Users/Mega-pc/anaconda3/python.exe" scripts/build_rapport.py
+    "C:/Users/Mega-pc/anaconda3/python.exe" scripts/build_rapport.py --prof
 
 Sortie :
-    rapport/Rapport_VaR_MENA.pdf
+    rapport/Rapport_VaR_MENA.pdf        (version complète, avec Q&A prof)
+    rapport/Rapport_VaR_MENA_prof.pdf   (version prof, sans le chapitre Q&A)
 """
 import re
+import sys
 import pathlib
 
 import pandas as pd
@@ -28,9 +31,49 @@ from fpdf import FPDF
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "rapport"
 OUT_DIR.mkdir(exist_ok=True)
-PDF_PATH = OUT_DIR / "Rapport_VaR_MENA.pdf"
+
+# --prof : génère la version « professeur » (sans le chapitre Q&A final).
+PROF = "--prof" in sys.argv
+PDF_PATH = OUT_DIR / ("Rapport_VaR_MENA_prof.pdf" if PROF else "Rapport_VaR_MENA.pdf")
 
 BEST_CSV = ROOT / "outputs" / "best_per_index.csv"
+
+# --------------------------------------------------------------------------
+# Diagnostic des résidus (chapitre 5) : les 5 tests sont recalculés en direct
+# sur ADI, avec le même package `tsvar` (et la même logique) que le
+# notebook, pour garantir que les p-values affichées dans le rapport restent
+# toujours cohérentes avec le code source.
+# --------------------------------------------------------------------------
+_SRC_DIR = ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
+from scipy import stats as _sps
+import numpy as _np
+from tsvar.data import train_test_returns
+from tsvar.classical import walk_forward_arima
+from tsvar.volatility import walk_forward_garch
+
+_DATA = ROOT / "data (1)" / "data"
+_tr, _te = train_test_returns("ADI", _DATA)
+_ra = _np.asarray(walk_forward_arima(_tr, _te).std_resid)
+_zg = _np.asarray(walk_forward_garch(_tr, _te).std_resid)
+
+_lb_p = float(acorr_ljungbox(_ra, lags=[10], return_df=True)["lb_pvalue"].iloc[0])
+_arch_p_a = float(het_arch(_ra, nlags=10)[1])
+_arch_p_g = float(het_arch(_zg, nlags=10)[1])
+_jb_p = float(_sps.jarque_bera(_zg)[1])
+_ks_p = float(_sps.kstest(_zg, "norm")[1])
+
+
+def fmt_pval(x):
+    """Formate une p-value pour affichage dans le tableau de diagnostic :
+    « < 0,001 » pour les très petites valeurs (y compris un sous-dépassement
+    numérique à 0.0, ce qui reste une p-value extrêmement faible)."""
+    if x < 0.001:
+        return "< 0,001"
+    return f"{x:.3f}".replace(".", ",")
 
 FONT_DIR = pathlib.Path("C:/Windows/Fonts")
 ARIAL_REG = FONT_DIR / "arial.ttf"
@@ -1084,6 +1127,62 @@ para(
     "ce qui est exactement le comportement recherché pour une VaR réactive au risque."
 )
 
+h2("Diagnostic des résidus (adéquation des modèles)")
+para(
+    "Avant de passer aux modèles Machine Learning / Deep Learning, on valide la spécification des "
+    "deux modèles déjà ajustés sur ADI - le modèle de **moyenne** (ARIMA) et le modèle de "
+    "**volatilité** (GARCH) - par une analyse de leurs résidus. Cette étape sert aussi à **justifier "
+    "le choix de la VaR par BHS** (Bootstrapped Historical Simulation, chapitre 8) : la BHS ne "
+    "suppose **pas** la normalité des résidus, elle les rééchantillonne empiriquement. Un test de "
+    "normalité sert donc ici à **montrer** que les résidus ne sont pas gaussiens (queues épaisses), "
+    "ce qui justifie de ne pas utiliser une VaR paramétrique gaussienne."
+)
+bullets([
+    "**Ljung-Box** (H0 : pas d'autocorrélation résiduelle) - appliqué aux résidus standardisés de "
+    "l'ARIMA. Une p-value > 0.05 signifie qu'on ne rejette pas H0 : les résidus sont « blancs », le "
+    "modèle de moyenne a bien capté la structure de la série.",
+    "**ARCH-LM** (test d'Engle, H0 : pas d'effet ARCH / d'hétéroscédasticité conditionnelle), "
+    "appliqué deux fois : sur les résidus ARIMA (une p-value < 0.05 rejette H0 et révèle un effet "
+    "ARCH résiduel -> motive l'usage du GARCH pour modéliser la variance conditionnelle) puis sur "
+    "les résidus standardisés GARCH (une p-value > 0.05 signifie que le GARCH a bien absorbé cette "
+    "hétéroscédasticité).",
+    "**Jarque-Bera** et **Kolmogorov-Smirnov** (H0 : normalité) - sur les résidus standardisés du "
+    "GARCH. Une p-value < 0.05 rejette la normalité : les résidus présentent des queues épaisses "
+    "(excès de kurtosis), typiques des rendements financiers.",
+])
+
+h3("Les 5 tests, calculés en direct sur ADI")
+simple_table(
+    ["Test", "p-value (ADI)", "Conclusion"],
+    [
+        ["Ljung-Box (résidus ARIMA)", fmt_pval(_lb_p),
+         "Pas d'autocorrélation : modèle de moyenne adéquat"],
+        ["ARCH-LM (résidus ARIMA)", fmt_pval(_arch_p_a),
+         "Effet ARCH présent : justifie le GARCH"],
+        ["ARCH-LM (résidus std. GARCH)", fmt_pval(_arch_p_g),
+         "Hétéroscédasticité absorbée : GARCH efficace"],
+        ["Jarque-Bera (std. GARCH)", fmt_pval(_jb_p),
+         "Non-normalité (queues épaisses) : justifie la BHS"],
+        ["Kolmogorov-Smirnov (std. GARCH)", fmt_pval(_ks_p),
+         "Non-normalité (queues épaisses) : justifie la BHS"],
+    ],
+    col_w=[55, 30, CONTENT_W - 55 - 30],
+)
+interp_box(
+    "Interprétation - la chaîne logique du diagnostic",
+    "Les quatre tests s'enchaînent pour raconter une seule histoire : le Ljung-Box (p = "
+    + fmt_pval(_lb_p) + ") montre que la moyenne est bien captée par l'ARIMA (pas d'autocorrélation "
+    "résiduelle) ; mais l'ARCH-LM sur ces mêmes résidus ARIMA (p " + fmt_pval(_arch_p_a) + ") révèle "
+    "un effet ARCH massif, ce qui justifie le passage au GARCH ; l'ARCH-LM sur les résidus "
+    "standardisés du GARCH (p = " + fmt_pval(_arch_p_g) + ") confirme que le GARCH absorbe bien cette "
+    "hétéroscédasticité résiduelle ; enfin, Jarque-Bera et Kolmogorov-Smirnov (p " + fmt_pval(_jb_p)
+    + " et p " + fmt_pval(_ks_p) + ") rejettent tous deux la normalité des résidus standardisés - "
+    "ils ont des queues épaisses, comme attendu pour des rendements financiers. C'est précisément "
+    "pour cette raison qu'on choisit la VaR par BHS (bootstrap historique) plutôt qu'une VaR "
+    "paramétrique gaussienne : la BHS rééchantillonne empiriquement les résidus observés, sans "
+    "supposer une forme de distribution particulière, ce qui la rend robuste à cette non-normalité."
+)
+
 # ==========================================================================
 # CHAPITRE 6 - RF & XGBoost
 # ==========================================================================
@@ -1628,101 +1727,102 @@ interp_box(
     "explicitement la variance dans le temps (GARCH) sur les indices MENA étudiés ici."
 )
 
-# ==========================================================================
-# CHAPITRE 11 - Questions probables du professeur
-# ==========================================================================
-h1("Questions probables du professeur et réponses", 11)
+if not PROF:
+    # ==========================================================================
+    # CHAPITRE 11 - Questions probables du professeur
+    # ==========================================================================
+    h1("Questions probables du professeur et réponses", 11)
 
-qr = [
-    (
-        "Pourquoi utiliser le rendement logarithmique plutôt que le prix ou le rendement simple ?",
-        "Parce que le prix n'est pas stationnaire (moyenne/variance non constantes, tendance de long "
-        "terme) alors que le rendement log l'est approximativement - ce qui est requis par les modèles "
-        "de séries temporelles (ADF/KPSS le confirment au chapitre 3). Le rendement log est de plus "
-        "additif dans le temps (la somme des rendements log = rendement log cumulé) et symétrise le "
-        "traitement des hausses et des baisses, contrairement au rendement simple.",
-    ),
-    (
-        "Que testent exactement ADF et KPSS, et pourquoi les combiner ?",
-        "ADF a pour H0 « racine unitaire = non-stationnaire » (on veut un p < 0.05 pour rejeter et "
-        "conclure à la stationnarité) ; KPSS a pour H0 « stationnaire » (on veut un p > 0.05 pour ne pas "
-        "rejeter). Comme leurs hypothèses nulles sont opposées, les combiner donne une conclusion plus "
-        "robuste : sur les rendements ADI, les deux s'accordent pour dire « stationnaire », ce qui est "
-        "une conclusion solide.",
-    ),
-    (
-        "Qu'est-ce que la méthode « train-once / walk-forward », et pourquoi ne pas réentraîner à "
-        "chaque pas ?",
-        "Chaque modèle est ajusté une seule fois sur le train, puis avancé jour par jour sur le test "
-        "en réinjectant les rendements réellement réalisés dans son historique, mais sans jamais "
-        "refaire l'estimation des paramètres. C'est un compromis réaliste entre un modèle figé "
-        "(trop optimiste, il ignorerait tout le test) et un modèle réestimé à chaque jour (coûteux en "
-        "calcul et peu représentatif d'un usage réel en production).",
-    ),
-    (
-        "Pourquoi GARCH bat-il le LSTM (et les autres) sur la plupart des indices MENA ?",
-        "GARCH modélise explicitement et de façon parcimonieuse (3 paramètres) le clustering de "
-        "volatilité observé dans les données (chapitre 2) : sa variance conditionnelle s'ajuste chaque "
-        "jour au choc et à la variance de la veille. Les échantillons MENA sont relativement petits "
-        "(quelques centaines à ~2500 observations), ce qui limite la capacité d'un LSTM à apprendre "
-        "cette structure temporelle sans a priori - un modèle économétrique dédié à cette dynamique "
-        "spécifique a donc un avantage naturel sur ce type de données et de volumétrie.",
-    ),
-    (
-        "Que teste précisément le test de Kupiec ?",
-        "Il teste si le taux de violations observé (nombre de jours où la perte réelle a dépassé la "
-        "VaR, divisé par le nombre total de jours) est statistiquement compatible avec le taux "
-        "attendu alpha. Techniquement, c'est un test du rapport de vraisemblance entre l'hypothèse "
-        "« le vrai taux est alpha » et l'hypothèse « le vrai taux est le taux observé », qui suit une loi "
-        "du Khi-2 à 1 degré de liberté. Un p < 0.05 signifie un rejet : le modèle est mal calibré "
-        "(trop ou pas assez de violations).",
-    ),
-    (
-        "Quelle est la différence entre le test de Kupiec et celui de Christoffersen ?",
-        "Kupiec ne regarde que le NOMBRE total de violations (couverture non-conditionnelle). "
-        "Christoffersen ajoute un test d'INDÉPENDANCE des violations dans le temps (elles ne doivent "
-        "pas être groupées) et combine les deux dans un test de couverture conditionnelle (Khi-2 à 2 "
-        "degrés de liberté). Un modèle peut passer Kupiec (bon nombre total de violations) mais "
-        "échouer à Christoffersen si ses violations sont groupées (par exemple toutes pendant une "
-        "crise), ce qui révèle un problème de réactivité du modèle à des chocs successifs.",
-    ),
-    (
-        "Pourquoi Random Forest échoue-t-il pour la VaR alors que son MAE est bon ?",
-        "Le MAE mesure la qualité de la prévision PONCTUELLE (la moyenne), pas la qualité de la VaR, "
-        "qui dépend aussi de sigma et de la forme des résidus. Random Forest produit des prévisions "
-        "trop « mean-reverting » (lissées), avec un sigma anormalement faible par rapport aux autres "
-        "modèles, ce qui rétrécit excessivement la bande de VaR - d'où un taux de violation observé "
-        "bien supérieur au taux attendu (jusqu'à 6 fois plus sur Tunindex), et un rejet massif du test "
-        "de Kupiec (zone rouge Bâle). C'est l'illustration centrale du projet : bonne prévision "
-        "ponctuelle n'implique pas bonne VaR.",
-    ),
-    (
-        "Que signifient les zones vertes/jaunes/rouges de Bâle ?",
-        "C'est une classification réglementaire du nombre de violations, normalisé sur une fenêtre de "
-        "250 jours de bourse. Zone verte = nombre de violations conforme aux attentes statistiques "
-        "(modèle interne accepté tel quel) ; zone jaune = zone d'alerte (le régulateur peut demander "
-        "des ajustements) ; zone rouge = trop de violations, le modèle interne est remis en cause. "
-        "Random Forest est le seul modèle qui atteint fréquemment la zone rouge/jaune dans ce projet.",
-    ),
-]
-for q, a in qr:
-    h2("Q. " + q)
-    pdf.set_fill_color(*COL_QUESTION_BG)
-    pdf.set_draw_color(200, 200, 215)
-    pdf.set_font("Arial", "", 10.2)
-    x0 = MARGIN
-    pdf.set_x(x0)
-    pdf.multi_cell(CONTENT_W, 5.6, "R. " + a, fill=True)
-    pdf.ln(3)
+    qr = [
+        (
+            "Pourquoi utiliser le rendement logarithmique plutôt que le prix ou le rendement simple ?",
+            "Parce que le prix n'est pas stationnaire (moyenne/variance non constantes, tendance de long "
+            "terme) alors que le rendement log l'est approximativement - ce qui est requis par les modèles "
+            "de séries temporelles (ADF/KPSS le confirment au chapitre 3). Le rendement log est de plus "
+            "additif dans le temps (la somme des rendements log = rendement log cumulé) et symétrise le "
+            "traitement des hausses et des baisses, contrairement au rendement simple.",
+        ),
+        (
+            "Que testent exactement ADF et KPSS, et pourquoi les combiner ?",
+            "ADF a pour H0 « racine unitaire = non-stationnaire » (on veut un p < 0.05 pour rejeter et "
+            "conclure à la stationnarité) ; KPSS a pour H0 « stationnaire » (on veut un p > 0.05 pour ne pas "
+            "rejeter). Comme leurs hypothèses nulles sont opposées, les combiner donne une conclusion plus "
+            "robuste : sur les rendements ADI, les deux s'accordent pour dire « stationnaire », ce qui est "
+            "une conclusion solide.",
+        ),
+        (
+            "Qu'est-ce que la méthode « train-once / walk-forward », et pourquoi ne pas réentraîner à "
+            "chaque pas ?",
+            "Chaque modèle est ajusté une seule fois sur le train, puis avancé jour par jour sur le test "
+            "en réinjectant les rendements réellement réalisés dans son historique, mais sans jamais "
+            "refaire l'estimation des paramètres. C'est un compromis réaliste entre un modèle figé "
+            "(trop optimiste, il ignorerait tout le test) et un modèle réestimé à chaque jour (coûteux en "
+            "calcul et peu représentatif d'un usage réel en production).",
+        ),
+        (
+            "Pourquoi GARCH bat-il le LSTM (et les autres) sur la plupart des indices MENA ?",
+            "GARCH modélise explicitement et de façon parcimonieuse (3 paramètres) le clustering de "
+            "volatilité observé dans les données (chapitre 2) : sa variance conditionnelle s'ajuste chaque "
+            "jour au choc et à la variance de la veille. Les échantillons MENA sont relativement petits "
+            "(quelques centaines à ~2500 observations), ce qui limite la capacité d'un LSTM à apprendre "
+            "cette structure temporelle sans a priori - un modèle économétrique dédié à cette dynamique "
+            "spécifique a donc un avantage naturel sur ce type de données et de volumétrie.",
+        ),
+        (
+            "Que teste précisément le test de Kupiec ?",
+            "Il teste si le taux de violations observé (nombre de jours où la perte réelle a dépassé la "
+            "VaR, divisé par le nombre total de jours) est statistiquement compatible avec le taux "
+            "attendu alpha. Techniquement, c'est un test du rapport de vraisemblance entre l'hypothèse "
+            "« le vrai taux est alpha » et l'hypothèse « le vrai taux est le taux observé », qui suit une loi "
+            "du Khi-2 à 1 degré de liberté. Un p < 0.05 signifie un rejet : le modèle est mal calibré "
+            "(trop ou pas assez de violations).",
+        ),
+        (
+            "Quelle est la différence entre le test de Kupiec et celui de Christoffersen ?",
+            "Kupiec ne regarde que le NOMBRE total de violations (couverture non-conditionnelle). "
+            "Christoffersen ajoute un test d'INDÉPENDANCE des violations dans le temps (elles ne doivent "
+            "pas être groupées) et combine les deux dans un test de couverture conditionnelle (Khi-2 à 2 "
+            "degrés de liberté). Un modèle peut passer Kupiec (bon nombre total de violations) mais "
+            "échouer à Christoffersen si ses violations sont groupées (par exemple toutes pendant une "
+            "crise), ce qui révèle un problème de réactivité du modèle à des chocs successifs.",
+        ),
+        (
+            "Pourquoi Random Forest échoue-t-il pour la VaR alors que son MAE est bon ?",
+            "Le MAE mesure la qualité de la prévision PONCTUELLE (la moyenne), pas la qualité de la VaR, "
+            "qui dépend aussi de sigma et de la forme des résidus. Random Forest produit des prévisions "
+            "trop « mean-reverting » (lissées), avec un sigma anormalement faible par rapport aux autres "
+            "modèles, ce qui rétrécit excessivement la bande de VaR - d'où un taux de violation observé "
+            "bien supérieur au taux attendu (jusqu'à 6 fois plus sur Tunindex), et un rejet massif du test "
+            "de Kupiec (zone rouge Bâle). C'est l'illustration centrale du projet : bonne prévision "
+            "ponctuelle n'implique pas bonne VaR.",
+        ),
+        (
+            "Que signifient les zones vertes/jaunes/rouges de Bâle ?",
+            "C'est une classification réglementaire du nombre de violations, normalisé sur une fenêtre de "
+            "250 jours de bourse. Zone verte = nombre de violations conforme aux attentes statistiques "
+            "(modèle interne accepté tel quel) ; zone jaune = zone d'alerte (le régulateur peut demander "
+            "des ajustements) ; zone rouge = trop de violations, le modèle interne est remis en cause. "
+            "Random Forest est le seul modèle qui atteint fréquemment la zone rouge/jaune dans ce projet.",
+        ),
+    ]
+    for q, a in qr:
+        h2("Q. " + q)
+        pdf.set_fill_color(*COL_QUESTION_BG)
+        pdf.set_draw_color(200, 200, 215)
+        pdf.set_font("Arial", "", 10.2)
+        x0 = MARGIN
+        pdf.set_x(x0)
+        pdf.multi_cell(CONTENT_W, 5.6, "R. " + a, fill=True)
+        pdf.ln(3)
 
-h2("Conseil pour l'oral")
-para(
-    "Ne cachez pas le fait que l'hypothèse de départ (« LSTM meilleur sur ADI ») n'est pas confirmée : "
-    "c'est un résultat scientifique valide et intéressant. Insistez plutôt sur le POURQUOI (petits "
-    "échantillons, structure de volatilité bien captée par un modèle paramétrique dédié) et sur le "
-    "message central du projet : MAE/RMSE et calibration de la VaR sont deux critères différents, et "
-    "c'est la calibration qui compte pour la gestion des risques."
-)
+    h2("Conseil pour l'oral")
+    para(
+        "Ne cachez pas le fait que l'hypothèse de départ (« LSTM meilleur sur ADI ») n'est pas confirmée : "
+        "c'est un résultat scientifique valide et intéressant. Insistez plutôt sur le POURQUOI (petits "
+        "échantillons, structure de volatilité bien captée par un modèle paramétrique dédié) et sur le "
+        "message central du projet : MAE/RMSE et calibration de la VaR sont deux critères différents, et "
+        "c'est la calibration qui compte pour la gestion des risques."
+    )
 
 # ==========================================================================
 # SAUVEGARDE
