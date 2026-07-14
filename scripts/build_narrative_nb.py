@@ -468,6 +468,99 @@ est exactement le comportement recherché pour une VaR réactive.
 """)
 
 # ---------------------------------------------------------------------------
+# Diagnostic des résidus (adéquation des modèles) — après ARIMA (5) et GARCH (6)
+# ---------------------------------------------------------------------------
+md("""
+## Diagnostic des résidus (adéquation des modèles)
+
+Avant de passer aux modèles Machine Learning / Deep Learning, on valide la
+spécification des deux modèles déjà ajustés sur ADI — le modèle de
+**moyenne** (ARIMA, section 5) et le modèle de **volatilité** (GARCH,
+section 6) — par une analyse de leurs résidus. Cette étape sert aussi à
+**justifier le choix de la VaR par BHS** (Bootstrapped Historical
+Simulation, section 9) : la BHS ne suppose **pas** la normalité des
+résidus, elle les rééchantillonne empiriquement. Un test de normalité sert
+donc ici à **montrer** que les résidus ne sont pas gaussiens (queues
+épaisses), ce qui justifie de ne pas utiliser une VaR paramétrique
+gaussienne.
+
+Quatre tests sont appliqués :
+
+- **Ljung-Box** (H0 : pas d'autocorrélation résiduelle) — sur les résidus
+  standardisés de l'ARIMA. Une p-value > 0.05 signifie qu'on ne rejette pas
+  H0 : les résidus sont "blancs", le modèle de moyenne a bien capté la
+  structure de la série.
+- **ARCH-LM** (test d'Engle, H0 : pas d'effet ARCH / d'hétéroscédasticité
+  conditionnelle), appliqué deux fois :
+  - sur les résidus **ARIMA** : une p-value < 0.05 rejette H0 et révèle un
+    effet ARCH résiduel → cela **motive l'usage du GARCH** pour modéliser
+    la variance conditionnelle ;
+  - sur les résidus standardisés **GARCH** : une p-value > 0.05 signifie
+    qu'on ne rejette plus H0 → le **GARCH a bien absorbé** cette
+    hétéroscédasticité.
+- **Jarque-Bera** et **Kolmogorov-Smirnov** (H0 : normalité) — sur les
+  résidus standardisés du GARCH. Une p-value < 0.05 rejette la normalité :
+  les résidus présentent des **queues épaisses** (excès de kurtosis),
+  typiques des rendements financiers.
+""")
+
+code("""
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
+from scipy import stats as _sps
+
+# On réutilise les modèles déjà ajustés sur ADI (sections 5 et 6) :
+# fc_arima (modèle de moyenne) et fc_garch (modèle de volatilité).
+
+# Résidus standardisés du modèle de MOYENNE (ARIMA)
+_res_arima = np.asarray(fc_arima.std_resid)
+
+# Résidus standardisés du modèle de VOLATILITÉ (GARCH)
+_z_garch = np.asarray(fc_garch.std_resid)
+
+# 1) Ljung-Box (autocorrélation résiduelle) sur résidus ARIMA — H0: pas d'autocorrélation
+_lb = acorr_ljungbox(_res_arima, lags=[10], return_df=True)
+_lb_p = float(_lb["lb_pvalue"].iloc[0])
+
+# 2) ARCH-LM sur résidus ARIMA — H0: pas d'effet ARCH (p<0.05 => effet ARCH présent => motive GARCH)
+_arch_stat_a, _arch_p_a = het_arch(_res_arima, nlags=10)[:2]
+
+# 3) ARCH-LM sur résidus standardisés GARCH (p>0.05 attendu => GARCH a absorbé l'hétéroscédasticité)
+_arch_stat_g, _arch_p_g = het_arch(_z_garch, nlags=10)[:2]
+
+# 4) Normalité des résidus standardisés GARCH — Jarque-Bera & Kolmogorov-Smirnov (H0: normalité)
+_jb_stat, _jb_p = _sps.jarque_bera(_z_garch)
+_ks_stat, _ks_p = _sps.kstest(_z_garch, "norm")
+
+print(f"Ljung-Box (ARIMA, lag=10)      : p = {_lb_p:.4f}")
+print(f"ARCH-LM  (résidus ARIMA)       : stat = {_arch_stat_a:.2f}, p = {_arch_p_a:.4f}")
+print(f"ARCH-LM  (résidus std. GARCH)  : stat = {_arch_stat_g:.2f}, p = {_arch_p_g:.4f}")
+print(f"Jarque-Bera (std. GARCH)       : stat = {_jb_stat:.1f}, p = {_jb_p:.4g}")
+print(f"Kolmogorov-Smirnov vs N(0,1)   : stat = {_ks_stat:.3f}, p = {_ks_p:.4g}")
+
+print("\\nInterprétation :")
+print(" - Ljung-Box        :", "pas d'autocorrélation résiduelle (modèle de moyenne adéquat)" if _lb_p > 0.05 else "autocorrélation résiduelle détectée")
+print(" - ARCH-LM (ARIMA)  :", "effet ARCH présent => justifie le GARCH" if _arch_p_a < 0.05 else "pas d'effet ARCH marqué")
+print(" - ARCH-LM (GARCH)  :", "hétéroscédasticité absorbée par le GARCH" if _arch_p_g > 0.05 else "reste de l'effet ARCH")
+print(" - Normalité (JB/KS):", "résidus NON normaux (queues épaisses) => justifie la BHS" if (_jb_p < 0.05 or _ks_p < 0.05) else "compatibles avec la normalité")
+""")
+
+md("""
+**Interprétation** : le test de Ljung-Box confirme que le modèle ARIMA a
+bien capté la structure linéaire de la moyenne (résidus non autocorrélés),
+tandis que l'ARCH-LM appliqué à ces mêmes résidus détecte un effet ARCH
+résiduel — ce qui **motive** le passage au GARCH (section 6). Sur les
+résidus standardisés du GARCH, l'ARCH-LM ne rejette plus H0 :
+l'hétéroscédasticité conditionnelle est bien absorbée. En revanche,
+Jarque-Bera et Kolmogorov-Smirnov rejettent la normalité de ces résidus
+standardisés (queues épaisses) : les modèles de moyenne et de volatilité
+sont donc adéquats, mais leurs résidus restent **non gaussiens**. C'est
+précisément cette non-normalité qui **justifie le choix de la BHS**
+(section 9) plutôt qu'une VaR paramétrique gaussienne — la BHS ne faisant
+aucune hypothèse de loi sur les résidus, contrairement à une VaR
+gaussienne qui sous-estimerait le risque de queue.
+""")
+
+# ---------------------------------------------------------------------------
 # 7. Machine Learning
 # ---------------------------------------------------------------------------
 md("""
