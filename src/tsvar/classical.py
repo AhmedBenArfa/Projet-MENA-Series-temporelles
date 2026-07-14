@@ -7,8 +7,11 @@ re-estimated. Every step's one-step-ahead mean forecast is captured before
 the new observation is appended.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from tsvar.var import ForecastResult
@@ -22,7 +25,9 @@ def _fit(train, order, seasonal_order):
         enforce_stationarity=False,
         enforce_invertibility=False,
     )
-    return m.fit(disp=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        return m.fit(disp=False, maxiter=200, method="lbfgs")
 
 
 def walk_forward_arima(train, test, order=None, seasonal_order=None) -> ForecastResult:

@@ -910,7 +910,9 @@ code_block(
 '''def _fit(train, order, seasonal_order):
     m = SARIMAX(train, order=order, seasonal_order=seasonal_order or (0, 0, 0, 0),
                 enforce_stationarity=False, enforce_invertibility=False)
-    return m.fit(disp=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        return m.fit(disp=False, maxiter=200, method="lbfgs")
 
 def walk_forward_arima(train, test, order=None, seasonal_order=None):
     if order is None:
