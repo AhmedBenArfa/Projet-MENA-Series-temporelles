@@ -78,11 +78,18 @@ class Rapport(FPDF):
             return
         self.set_font("Arial", "", 8)
         self.set_text_color(130, 130, 130)
-        self.set_y(8)
+        self.set_xy(MARGIN, 8)
         self.cell(0, 6, "Rapport VaR MENA - " + self.chapter_label, align="L")
         self.set_draw_color(200, 200, 200)
         self.line(MARGIN, 14, PAGE_W - MARGIN, 14)
         self.set_text_color(*COL_TEXT)
+        # Important : cell() ci-dessus laisse le curseur X a la marge DROITE
+        # (comportement par defaut de fpdf2) et add_page() ne repositionne
+        # PAS automatiquement (x, y) apres l'appel a header(). On repositionne
+        # donc explicitement le curseur au debut de la zone de contenu, sous
+        # le bandeau d'en-tete, pour que le premier element de la page (titre
+        # de chapitre ou paragraphe) parte du bon endroit.
+        self.set_xy(MARGIN, 20)
 
     def footer(self):
         if not self._cover_done:
@@ -146,12 +153,18 @@ def bullets(items, size=10.5, line_h=5.2):
 
 
 def h1(title, number=None):
-    pdf.add_page()
     label = f"{number}. {title}" if number is not None else title
-    pdf.chapter_label = label
+    pdf.chapter_label = label  # mis a jour AVANT add_page() pour que le
+    # bandeau d'en-tete de la nouvelle page affiche deja le bon chapitre
+    pdf.add_page()
     pdf.set_font("Arial", "B", 17)
     pdf.set_text_color(*COL_TITLE)
     pdf.start_section(label, level=0)
+    # Important : après add_page() -> header(), le curseur X est laissé à la
+    # marge DROITE (le cell() du header avance x par défaut) - il faut donc
+    # explicitement le remettre à la marge gauche avant d'écrire le titre,
+    # sinon le titre du chapitre se retrouve écrit (et coupé) tout à droite.
+    pdf.set_xy(MARGIN, pdf.get_y())
     pdf.multi_cell(CONTENT_W, 9, label, align="L")
     pdf.set_draw_color(*COL_TITLE)
     pdf.set_line_width(0.8)
@@ -330,6 +343,9 @@ pdf.set_text_color(*COL_TEXT)
 
 # à partir d'ici, header/footer actifs
 pdf._cover_done = True
+pdf.chapter_label = "Table des matieres"
+pdf.add_page()  # la table des matières démarre sur sa propre page (jamais
+# à la suite du texte de la page de garde, même s'il reste de la place)
 
 
 # ==========================================================================
@@ -338,7 +354,8 @@ pdf._cover_done = True
 def render_toc(pdf_obj, outline):
     pdf_obj.set_font("Arial", "B", 16)
     pdf_obj.set_text_color(*COL_TITLE)
-    pdf_obj.cell(0, 12, "Table des matières", align="L")
+    pdf_obj.set_xy(MARGIN, 24)
+    pdf_obj.cell(0, 12, "Table des matieres", align="L")
     pdf_obj.ln(14)
     for section in outline:
         pdf_obj.set_font("Arial", "B", 11)
@@ -355,7 +372,7 @@ def render_toc(pdf_obj, outline):
         pdf_obj.ln(7)
 
 
-pdf.insert_toc_placeholder(render_toc, pages=2)
+pdf.insert_toc_placeholder(render_toc, pages=1)
 
 # ==========================================================================
 # CHAPITRE 0 - Présentation, contexte, méthodologie
